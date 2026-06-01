@@ -1,0 +1,40 @@
+{
+  "name": "nextjs-sample",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "tsc -b --noEmit && eslint . --max-warnings=0",
+    "lint:prettier": "prettier --check .",
+    "lint:knip": "knip",
+    "lint:jscpd": "jscpd --config jscpd.config.json",
+    "lint:full": "yarn lint && yarn lint:prettier && yarn lint:knip && yarn lint:jscpd",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "next": "16.0.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "three": "^0.184.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/three": "^0.184.1",
+    "clsx": "^2.1.1",
+    "eslint": "^9",
+    "eslint-config-next": "16.0.0",
+    "eslint-config-prettier": "^10.1.8",
+    "jscpd": "^4.0.5",
+    "knip": "^5.66.3",
+    "prettier": "^3.6.2",
+    "prettier-plugin-tailwindcss": "^0.7.1",
+    "tailwind-merge": "^3.4.0",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
