@@ -1,5 +1,17 @@
 export type LoadState = "empty" | "loading" | "ready" | "error";
 
+export type LooseEdgeLoopMode =
+  | "none"
+  | "fill"
+  | "extrude-x"
+  | "extrude-y"
+  | "extrude-z"
+  | "extrude-normal"
+  | "cylinder-x"
+  | "cylinder-y"
+  | "cylinder-z"
+  | "cylinder-normal";
+
 export type LinkedFaceSelectionState = {
   active: boolean;
   count: number;

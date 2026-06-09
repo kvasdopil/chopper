@@ -3,19 +3,20 @@
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { Line2 } from "three/examples/jsm/lines/Line2.js";
-import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { LinkedFaceSelectionPanel } from "./viewer-controls/linked-face-selection-panel";
+import { LoopPanel } from "./viewer-controls/loop-panel";
 import { ObjectsPanel } from "./viewer-controls/objects-panel";
 import { TopBar } from "./viewer-controls/top-bar";
 import type {
   LinkedFaceSelectionGraph,
   LinkedFaceSelectionState,
   LoadState,
+  LooseEdgeLoopMode,
   SeparatedObjectSummary,
 } from "./viewer-controls/types";
 
@@ -32,14 +33,39 @@ const cameraNearPlane = 0.001;
 const clickMoveTolerance = 4;
 const hoverEdgeColor = 0xfacc15;
 const hoverEdgeLineWidth = 2;
+const hoverEdgeRenderOrder = 3;
+const selectedObjectOutlineColor = 0xfacc15;
+const selectedObjectOutlinePixels = 2;
+const selectedObjectStencilRenderOrder = 3.9;
+const selectedObjectOutlineRenderOrder = 4;
+const looseEdgeColor = 0xef4444;
+const looseEdgeHoverColor = 0x2563eb;
+const looseEdgeLineWidth = 3;
+const looseEdgeUiOverlayLineWidth = 4;
+const looseEdgeHoverHitTolerancePx = 5;
+const looseEdgeHoverRenderOrder = 8;
+const obstructedLooseEdgeLineWidth = 1;
+const obstructedLooseEdgeOpacity = 0.6;
 const linkedFaceSelectionColor = new THREE.Color(0xfacc15);
 const linkedFaceSelectionLineWidth = 2;
+const selectedLooseEdgeLoopColor = 0xfacc15;
+const capOffsetGizmoColor = 0x38bdf8;
+const capOffsetGizmoHeadScale = 0.055;
+const capOffsetGizmoHitTolerancePx = 10;
+const capOffsetGizmoMinLength = 0.08;
+const looseEdgeLoopCylinderRadiusScale = 0.8;
+const looseEdgeLoopCylinderSegments = 16;
+const looseEdgeLoopOcclusionOpacity = 0.3;
+const looseEdgeLoopOcclusionRenderOrder = 2;
+const looseEdgeLoopOcclusionStencilRef = 2;
 const defaultLinkedFaceSelectionAngle = 10;
 const maxLinkedFaceSelectionAngle = 90;
 const linkedFaceSelectionGraphInterval = 0.1;
 const linkedFaceSelectionGraphWidth = 240;
 const linkedFaceSelectionGraphHeight = 56;
 const minLoosePartTriangleCountToSeparate = 10;
+const separationProgressCheckInterval = 256;
+const separationProgressUpdateIntervalMs = 500;
 
 type TriangleEdgeFace = {
   direction: THREE.Vector3;
@@ -50,10 +76,74 @@ type TriangleVertex = {
   point: THREE.Vector3;
 };
 type HoveredEdge = {
+  boundaryPositions?: Float32Array;
   end: THREE.Vector3;
+  isLooseEdge?: boolean;
+  isSelectionBoundary?: boolean;
   key: string;
+  loopId?: number;
   mesh: THREE.Mesh;
+  objectId: number;
   start: THREE.Vector3;
+};
+type LooseEdgeLoop = {
+  id: number;
+  objectId: number;
+  positions: Float32Array;
+  segmentIndexes: number[];
+  segmentKeys: string[];
+};
+type LooseEdgeLoopCapState = {
+  fill: THREE.Mesh | null;
+  mode: LooseEdgeLoopMode;
+  normalTarget: THREE.Vector3 | null;
+  occlusionOverlay: THREE.Mesh | null;
+  objectId: number;
+  offset: number;
+  sourceMeshUuid: string;
+};
+type LooseEdgeLoopCapAxisData = {
+  axis: THREE.Vector3;
+  data: LooseEdgeLoopFillData;
+  defaultOffset: number;
+};
+type CapOffsetDragState = {
+  edge: HoveredEdge;
+  pixelsPerOffsetUnit?: number;
+  pointerId: number;
+  screenAxis?: THREE.Vector2;
+  startClientX: number;
+  startClientY: number;
+  startOffset: number;
+};
+type LooseEdgeSegment = {
+  end: THREE.Vector3;
+  endKey: string;
+  edgeKey: string;
+  index: number;
+  loopId: number;
+  normal: THREE.Vector3;
+  objectId: number;
+  start: THREE.Vector3;
+  startKey: string;
+};
+type LooseEdgeRenderCache = {
+  colors: Float32Array;
+  positions: Float32Array;
+  segmentCount: number;
+};
+type LooseEdgeLoopFillSegment = {
+  end: THREE.Vector3;
+  endIndex: number;
+  start: THREE.Vector3;
+  startIndex: number;
+};
+type LooseEdgeLoopFillData = {
+  center: THREE.Vector3;
+  objectCenter: THREE.Vector3 | null;
+  points: THREE.Vector3[];
+  referenceNormal: THREE.Vector3;
+  segments: LooseEdgeLoopFillSegment[];
 };
 type TriangleTopology = {
   edgeKeys: string[];
@@ -72,6 +162,12 @@ type LinkedFaceSelectionDetails = {
   selectedTriangleIndexes: Set<number>;
   topology: MeshTopology;
 };
+type SelectionBoundaryLoop = {
+  id: number;
+  positions: Float32Array;
+  segmentKeys: string[];
+  selectedTriangleIndexes: number[];
+};
 type LinkedFaceSelectionCache = LinkedFaceSelectionGraph & {
   mesh: THREE.Mesh;
   objectId: number;
@@ -79,11 +175,32 @@ type LinkedFaceSelectionCache = LinkedFaceSelectionGraph & {
   thresholdByTriangle: Float32Array;
   topology: MeshTopology;
 };
+type RememberedTriangleSelection = {
+  mesh: THREE.Mesh;
+  objectId: number;
+  triangleIndex: number;
+};
 type DisposableDrawObject = THREE.Object3D & {
   geometry: THREE.BufferGeometry;
   material: THREE.Material | THREE.Material[];
 };
 type ObjectNameMap = Record<number, string>;
+type SeparationProgressReporter = (message: string, force?: boolean) => Promise<void>;
+
+const vertexTopologyIdsByPosition = new WeakMap<THREE.BufferAttribute, Uint32Array>();
+
+function isCylinderLoopMode(mode: LooseEdgeLoopMode) {
+  return (
+    mode === "cylinder-x" ||
+    mode === "cylinder-y" ||
+    mode === "cylinder-z" ||
+    mode === "cylinder-normal"
+  );
+}
+
+function isNormalTargetLoopMode(mode: LooseEdgeLoopMode) {
+  return mode === "extrude-normal" || mode === "cylinder-normal";
+}
 
 function isMesh(object: THREE.Object3D): object is THREE.Mesh {
   return (object as THREE.Mesh).isMesh === true;
@@ -105,6 +222,73 @@ function disposeMaterial(material: THREE.Material | THREE.Material[]) {
   }
 
   material.dispose();
+}
+
+function setLooseEdgeLoopFillBaseMaterial(mesh: THREE.Mesh, markStencil: boolean) {
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+
+  mesh.renderOrder = 0;
+
+  materials.forEach((material) => {
+    material.transparent = false;
+    material.opacity = 1;
+    material.depthFunc = THREE.LessEqualDepth;
+    material.depthTest = true;
+    material.depthWrite = true;
+    material.stencilWrite = markStencil;
+    material.stencilFunc = THREE.AlwaysStencilFunc;
+    material.stencilRef = looseEdgeLoopOcclusionStencilRef;
+    material.stencilFail = THREE.KeepStencilOp;
+    material.stencilZFail = THREE.KeepStencilOp;
+    material.stencilZPass = THREE.ReplaceStencilOp;
+    material.needsUpdate = true;
+  });
+}
+
+function createLooseEdgeLoopFillOcclusionOverlay(fill: THREE.Mesh) {
+  const sourceMaterial = Array.isArray(fill.material) ? fill.material[0] : fill.material;
+  const material = sourceMaterial.clone();
+  const overlay = new THREE.Mesh(fill.geometry, material);
+
+  overlay.name = "loose-edge-loop-occlusion-overlay";
+  overlay.position.copy(fill.position);
+  overlay.quaternion.copy(fill.quaternion);
+  overlay.scale.copy(fill.scale);
+  overlay.matrix.copy(fill.matrix);
+  overlay.matrixAutoUpdate = fill.matrixAutoUpdate;
+  overlay.renderOrder = looseEdgeLoopOcclusionRenderOrder;
+  overlay.userData.isLooseEdgeFillOverlay = true;
+  overlay.userData.fillKey = fill.userData.fillKey;
+  overlay.userData.loopId = fill.userData.loopId;
+  overlay.userData.objectId = fill.userData.objectId;
+  overlay.userData.sourceMeshUuid = fill.userData.sourceMeshUuid;
+
+  material.transparent = true;
+  material.opacity = looseEdgeLoopOcclusionOpacity;
+  material.depthFunc = THREE.GreaterDepth;
+  material.depthTest = true;
+  material.depthWrite = false;
+  material.stencilWrite = false;
+  material.stencilFunc = THREE.NotEqualStencilFunc;
+  material.stencilRef = looseEdgeLoopOcclusionStencilRef;
+  material.stencilFail = THREE.KeepStencilOp;
+  material.stencilZFail = THREE.KeepStencilOp;
+  material.stencilZPass = THREE.KeepStencilOp;
+  material.needsUpdate = true;
+
+  return overlay;
+}
+
+function disposeLooseEdgeLoopFillOcclusionOverlay(state: LooseEdgeLoopCapState) {
+  const overlay = state.occlusionOverlay;
+
+  if (!overlay) {
+    return;
+  }
+
+  overlay.parent?.remove(overlay);
+  disposeMaterial(overlay.material);
+  state.occlusionOverlay = null;
 }
 
 function disposeObject(object: THREE.Object3D) {
@@ -139,12 +323,43 @@ function clearModel(root: THREE.Group) {
 
 function getVertexKey(position: THREE.BufferAttribute, index: number) {
   const precision = 100000;
-
-  return [
+  const topologyId = vertexTopologyIdsByPosition.get(position)?.[index] ?? 0;
+  const positionKey = [
     Math.round(position.getX(index) * precision),
     Math.round(position.getY(index) * precision),
     Math.round(position.getZ(index) * precision),
   ].join(",");
+
+  return topologyId > 0 ? `${positionKey}#${topologyId}` : positionKey;
+}
+
+function ensureVertexTopologyIds(position: THREE.BufferAttribute) {
+  const existing = vertexTopologyIdsByPosition.get(position);
+
+  if (existing && existing.length === position.count) {
+    return existing;
+  }
+
+  const topologyIds = new Uint32Array(position.count);
+
+  vertexTopologyIdsByPosition.set(position, topologyIds);
+
+  return topologyIds;
+}
+
+function getNextVertexTopologyId(position: THREE.BufferAttribute) {
+  const topologyIds = ensureVertexTopologyIds(position);
+  let nextTopologyId = 1;
+
+  for (let index = 0; index < topologyIds.length; index += 1) {
+    nextTopologyId = Math.max(nextTopologyId, topologyIds[index] + 1);
+  }
+
+  return nextTopologyId;
+}
+
+function getLooseEdgeKey(objectId: number, edgeKey: string) {
+  return `${objectId}:${edgeKey}`;
 }
 
 function getSeparatedObjectColor(objectId: number) {
@@ -190,6 +405,92 @@ function getTriangleObjectIds(mesh: THREE.Mesh) {
   mesh.geometry.userData.triangleObjectIds = objectIds;
 
   return objectIds;
+}
+
+function getTriangleObjectId(mesh: THREE.Mesh, triangleIndex: number) {
+  return getTriangleObjectIds(mesh)?.[triangleIndex] ?? defaultObjectId;
+}
+
+function getTriangleObjectIdSet(mesh: THREE.Mesh) {
+  const existing = mesh.geometry.userData.triangleObjectIdSet;
+
+  if (existing instanceof Set) {
+    return existing as Set<number>;
+  }
+
+  const objectIds = getTriangleObjectIds(mesh);
+
+  if (!objectIds) {
+    return new Set<number>();
+  }
+
+  const objectIdSet = new Set<number>();
+
+  objectIds.forEach((objectId) => objectIdSet.add(objectId));
+  mesh.geometry.userData.triangleObjectIdSet = objectIdSet;
+
+  return objectIdSet;
+}
+
+function refreshTriangleObjectIdAttribute(mesh: THREE.Mesh) {
+  const position = mesh.geometry.getAttribute("position");
+  const objectIds = getTriangleObjectIds(mesh);
+
+  if (!(position instanceof THREE.BufferAttribute) || !objectIds) {
+    return;
+  }
+
+  const existing = mesh.geometry.getAttribute("objectId");
+  const canReuseExisting =
+    existing instanceof THREE.BufferAttribute &&
+    existing.count === position.count &&
+    existing.array instanceof Float32Array;
+  const values: Float32Array =
+    canReuseExisting && existing instanceof THREE.BufferAttribute
+      ? (existing.array as Float32Array)
+      : new Float32Array(position.count);
+  const objectIdSet = new Set<number>();
+
+  for (let triangleIndex = 0; triangleIndex < objectIds.length; triangleIndex += 1) {
+    const vertexIndex = triangleIndex * 3;
+    const objectId = objectIds[triangleIndex] ?? defaultObjectId;
+
+    objectIdSet.add(objectId);
+    values[vertexIndex] = objectId;
+    values[vertexIndex + 1] = objectId;
+    values[vertexIndex + 2] = objectId;
+  }
+
+  mesh.geometry.userData.triangleObjectIdSet = objectIdSet;
+
+  if (canReuseExisting && existing instanceof THREE.BufferAttribute) {
+    existing.needsUpdate = true;
+    return;
+  }
+
+  mesh.geometry.setAttribute("objectId", new THREE.BufferAttribute(values, 1));
+}
+
+function waitForBrowserPaint() {
+  return new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
+function createThrottledProgressReporter(setProgress: (message: string) => void) {
+  let lastUpdate = 0;
+
+  return async (message: string, force = false) => {
+    const now = performance.now();
+
+    if (!force && now - lastUpdate < separationProgressUpdateIntervalMs) {
+      return;
+    }
+
+    lastUpdate = now;
+    setProgress(message);
+    await waitForBrowserPaint();
+  };
 }
 
 function collectSeparatedObjects(
@@ -333,6 +634,115 @@ function createFaceMaterial(visible = true) {
   return material;
 }
 
+function createSelectedObjectStencilMaterial() {
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      selectedObjectId: { value: -1 },
+    },
+    vertexShader: `
+      attribute float objectId;
+      varying float vObjectId;
+
+      void main() {
+        vObjectId = objectId;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float selectedObjectId;
+      varying float vObjectId;
+
+      void main() {
+        if (abs(vObjectId - selectedObjectId) > 0.5) {
+          discard;
+        }
+
+        gl_FragColor = vec4(1.0);
+      }
+    `,
+    colorWrite: false,
+    depthTest: true,
+    depthWrite: false,
+    side: THREE.FrontSide,
+  });
+
+  material.stencilWrite = true;
+  material.stencilFunc = THREE.AlwaysStencilFunc;
+  material.stencilRef = 1;
+  material.stencilFail = THREE.KeepStencilOp;
+  material.stencilZFail = THREE.KeepStencilOp;
+  material.stencilZPass = THREE.ReplaceStencilOp;
+
+  return material;
+}
+
+function createSelectedObjectOutlineMaterial() {
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      outlineColor: { value: new THREE.Color(selectedObjectOutlineColor) },
+      outlinePixels: { value: selectedObjectOutlinePixels },
+      resolution: { value: new THREE.Vector2(1, 1) },
+      selectedObjectId: { value: -1 },
+    },
+    vertexShader: `
+      attribute float objectId;
+      uniform float outlinePixels;
+      uniform vec2 resolution;
+      varying float vObjectId;
+
+      void main() {
+        vObjectId = objectId;
+
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        vec4 clipPosition = projectionMatrix * viewPosition;
+        vec3 viewNormal = normalize(normalMatrix * normal);
+        vec4 clipNormal = projectionMatrix * vec4(viewNormal, 0.0);
+        vec2 direction = clipNormal.xy;
+        float lengthSq = dot(direction, direction);
+
+        if (lengthSq < 0.000001) {
+          direction = clipPosition.xy;
+          lengthSq = dot(direction, direction);
+        }
+
+        if (lengthSq > 0.000001) {
+          direction = normalize(direction);
+          clipPosition.xy += direction * outlinePixels * 2.0 * clipPosition.w / resolution;
+        }
+
+        gl_Position = clipPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 outlineColor;
+      uniform float selectedObjectId;
+      varying float vObjectId;
+
+      void main() {
+        if (abs(vObjectId - selectedObjectId) > 0.5) {
+          discard;
+        }
+
+        gl_FragColor = vec4(outlineColor, 1.0);
+      }
+    `,
+    depthTest: true,
+    depthWrite: false,
+    side: THREE.BackSide,
+  });
+
+  material.depthFunc = THREE.LessDepth;
+  material.stencilWrite = true;
+  material.stencilWriteMask = 0x00;
+  material.stencilFunc = THREE.NotEqualStencilFunc;
+  material.stencilRef = 1;
+  material.stencilFail = THREE.KeepStencilOp;
+  material.stencilZFail = THREE.KeepStencilOp;
+  material.stencilZPass = THREE.KeepStencilOp;
+
+  return material;
+}
+
 function refreshMeshObjectMaterialGroups(mesh: THREE.Mesh, hiddenObjectIds: Set<number>) {
   const position = mesh.geometry.getAttribute("position");
   const objectIds = getTriangleObjectIds(mesh);
@@ -340,6 +750,8 @@ function refreshMeshObjectMaterialGroups(mesh: THREE.Mesh, hiddenObjectIds: Set<
   if (!(position instanceof THREE.BufferAttribute) || !objectIds || objectIds.length === 0) {
     return;
   }
+
+  refreshTriangleObjectIdAttribute(mesh);
 
   const objectIdList = Array.from(new Set(objectIds)).sort((first, second) => first - second);
   const materialIndexByObjectId = new Map(objectIdList.map((objectId, index) => [objectId, index]));
@@ -393,6 +805,14 @@ function styleModel(model: THREE.Object3D) {
     const geometry = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
     const position = geometry.getAttribute("position");
 
+    if (!(position instanceof THREE.BufferAttribute)) {
+      return;
+    }
+
+    if (!(geometry.getAttribute("normal") instanceof THREE.BufferAttribute)) {
+      geometry.computeVertexNormals();
+    }
+
     geometry.setAttribute(
       "color",
       new THREE.BufferAttribute(new Float32Array(position.count * 3), 3),
@@ -426,8 +846,78 @@ function styleModel(model: THREE.Object3D) {
     wireframe.visible = true;
     mesh.userData.wireframeOverlay = wireframe;
 
-    const hoverEdge = new Line2(
-      new LineGeometry(),
+    const obstructedLooseEdges = new LineSegments2(
+      new LineSegmentsGeometry(),
+      new LineMaterial({
+        color: 0xffffff,
+        depthTest: false,
+        depthWrite: false,
+        linewidth: obstructedLooseEdgeLineWidth,
+        opacity: obstructedLooseEdgeOpacity,
+        transparent: true,
+        vertexColors: true,
+      }),
+    );
+    obstructedLooseEdges.name = "obstructed-loose-edge-overlay";
+    obstructedLooseEdges.position.copy(mesh.position);
+    obstructedLooseEdges.quaternion.copy(mesh.quaternion);
+    obstructedLooseEdges.scale.copy(mesh.scale);
+    obstructedLooseEdges.matrix.copy(mesh.matrix);
+    obstructedLooseEdges.matrixAutoUpdate = mesh.matrixAutoUpdate;
+    obstructedLooseEdges.renderOrder = 6;
+    obstructedLooseEdges.userData.isLooseEdgeOverlay = true;
+    obstructedLooseEdges.visible = false;
+    mesh.userData.obstructedLooseEdgeOverlay = obstructedLooseEdges;
+
+    const looseEdges = new LineSegments2(
+      new LineSegmentsGeometry(),
+      new LineMaterial({
+        color: 0xffffff,
+        depthTest: true,
+        depthWrite: false,
+        linewidth: looseEdgeLineWidth,
+        vertexColors: true,
+      }),
+    );
+    looseEdges.name = "loose-edge-overlay";
+    looseEdges.position.copy(mesh.position);
+    looseEdges.quaternion.copy(mesh.quaternion);
+    looseEdges.scale.copy(mesh.scale);
+    looseEdges.matrix.copy(mesh.matrix);
+    looseEdges.matrixAutoUpdate = mesh.matrixAutoUpdate;
+    looseEdges.renderOrder = 7;
+    looseEdges.userData.isLooseEdgeOverlay = true;
+    looseEdges.visible = false;
+    mesh.userData.looseEdgeOverlay = looseEdges;
+    refreshLooseEdgeOverlay(mesh, new Set<number>(), null);
+
+    const selectedObjectStencil = new THREE.Mesh(geometry, createSelectedObjectStencilMaterial());
+    selectedObjectStencil.name = "selected-object-stencil-overlay";
+    selectedObjectStencil.position.copy(mesh.position);
+    selectedObjectStencil.quaternion.copy(mesh.quaternion);
+    selectedObjectStencil.scale.copy(mesh.scale);
+    selectedObjectStencil.matrix.copy(mesh.matrix);
+    selectedObjectStencil.matrixAutoUpdate = mesh.matrixAutoUpdate;
+    selectedObjectStencil.renderOrder = selectedObjectStencilRenderOrder;
+    selectedObjectStencil.userData.isSelectedObjectStencilOverlay = true;
+    selectedObjectStencil.visible = false;
+    mesh.userData.selectedObjectStencilOverlay = selectedObjectStencil;
+
+    const selectedObjectOutline = new THREE.Mesh(geometry, createSelectedObjectOutlineMaterial());
+    selectedObjectOutline.name = "selected-object-outline-overlay";
+    selectedObjectOutline.position.copy(mesh.position);
+    selectedObjectOutline.quaternion.copy(mesh.quaternion);
+    selectedObjectOutline.scale.copy(mesh.scale);
+    selectedObjectOutline.matrix.copy(mesh.matrix);
+    selectedObjectOutline.matrixAutoUpdate = mesh.matrixAutoUpdate;
+    selectedObjectOutline.renderOrder = selectedObjectOutlineRenderOrder;
+    selectedObjectOutline.userData.isSelectedObjectOutlineOverlay = true;
+    selectedObjectOutline.visible = false;
+    mesh.userData.selectedObjectOutlineOverlay = selectedObjectOutline;
+    refreshSelectedObjectOutlineOverlay(mesh, new Set<number>(), null);
+
+    const hoverEdge = new LineSegments2(
+      new LineSegmentsGeometry(),
       new LineMaterial({
         color: hoverEdgeColor,
         depthTest: false,
@@ -441,13 +931,29 @@ function styleModel(model: THREE.Object3D) {
     hoverEdge.scale.copy(mesh.scale);
     hoverEdge.matrix.copy(mesh.matrix);
     hoverEdge.matrixAutoUpdate = mesh.matrixAutoUpdate;
-    hoverEdge.renderOrder = 3;
+    hoverEdge.renderOrder = hoverEdgeRenderOrder;
     hoverEdge.userData.isHoverEdgeOverlay = true;
     hoverEdge.visible = false;
     mesh.userData.hoverEdgeOverlay = hoverEdge;
 
     overlays.push({
       overlay: wireframe,
+      parent: mesh.parent ?? model,
+    });
+    overlays.push({
+      overlay: obstructedLooseEdges,
+      parent: mesh.parent ?? model,
+    });
+    overlays.push({
+      overlay: looseEdges,
+      parent: mesh.parent ?? model,
+    });
+    overlays.push({
+      overlay: selectedObjectStencil,
+      parent: mesh.parent ?? model,
+    });
+    overlays.push({
+      overlay: selectedObjectOutline,
       parent: mesh.parent ?? model,
     });
     overlays.push({
@@ -516,6 +1022,365 @@ function refreshObjectWireframes(model: THREE.Object3D, hiddenObjectIds: Set<num
   model.traverse((child) => {
     if (isSelectableMesh(child)) {
       refreshObjectWireframe(child, hiddenObjectIds);
+    }
+  });
+}
+
+function refreshSelectedObjectOutlineOverlay(
+  mesh: THREE.Mesh,
+  hiddenObjectIds: Set<number>,
+  selectedObjectId: number | null,
+) {
+  const stencil = mesh.userData.selectedObjectStencilOverlay as THREE.Mesh | undefined;
+  const outline = mesh.userData.selectedObjectOutlineOverlay as THREE.Mesh | undefined;
+  const objectIdSet = getTriangleObjectIdSet(mesh);
+  const isVisible =
+    selectedObjectId != null &&
+    !hiddenObjectIds.has(selectedObjectId) &&
+    objectIdSet.has(selectedObjectId);
+
+  [stencil, outline].forEach((overlay) => {
+    if (!overlay) {
+      return;
+    }
+
+    overlay.visible = isVisible;
+
+    if (overlay.material instanceof THREE.ShaderMaterial) {
+      overlay.material.uniforms.selectedObjectId.value = selectedObjectId ?? -1;
+    }
+  });
+}
+
+function refreshSelectedObjectOutlines(
+  model: THREE.Object3D,
+  hiddenObjectIds: Set<number>,
+  selectedObjectId: number | null,
+) {
+  model.traverse((child) => {
+    if (isSelectableMesh(child)) {
+      refreshSelectedObjectOutlineOverlay(child, hiddenObjectIds, selectedObjectId);
+    }
+  });
+}
+
+function createLooseEdgeGeometry(
+  mesh: THREE.Mesh,
+  hiddenObjectIds: Set<number>,
+  selectedObjectId: number | null,
+) {
+  const geometry = new LineSegmentsGeometry();
+  const position = mesh.geometry.getAttribute("position");
+  const objectIds = getTriangleObjectIds(mesh);
+  const edgeSegments = new Map<
+    string,
+    {
+      count: number;
+      end: THREE.Vector3;
+      endKey: string;
+      edgeKey: string;
+      normal: THREE.Vector3;
+      objectId: number;
+      start: THREE.Vector3;
+      startKey: string;
+    }
+  >();
+
+  if (!(position instanceof THREE.BufferAttribute)) {
+    geometry.userData.segmentCount = 0;
+    mesh.userData.looseEdgeKeys = new Set<string>();
+    mesh.userData.looseEdgeKeysByVertexKey = new Map<string, Set<string>>();
+    mesh.userData.looseEdgeLoopById = new Map<number, LooseEdgeLoop>();
+    mesh.userData.looseEdgeSegmentsByKey = new Map<string, LooseEdgeSegment>();
+    return geometry;
+  }
+
+  for (let index = 0; index < position.count; index += 3) {
+    const triangleIndex = index / 3;
+    const objectId = objectIds?.[triangleIndex] ?? defaultObjectId;
+
+    const vertices = [
+      {
+        key: getVertexKey(position, index),
+        point: new THREE.Vector3().fromBufferAttribute(position, index),
+      },
+      {
+        key: getVertexKey(position, index + 1),
+        point: new THREE.Vector3().fromBufferAttribute(position, index + 1),
+      },
+      {
+        key: getVertexKey(position, index + 2),
+        point: new THREE.Vector3().fromBufferAttribute(position, index + 2),
+      },
+    ];
+    const normal = getTriangleNormal(vertices).normalize();
+
+    [
+      [vertices[0], vertices[1]],
+      [vertices[1], vertices[2]],
+      [vertices[2], vertices[0]],
+    ].forEach(([start, end]) => {
+      const edgeKey = [start.key, end.key].sort().join("|");
+      const key = getLooseEdgeKey(objectId, edgeKey);
+      const existing = edgeSegments.get(key);
+
+      if (existing) {
+        existing.count += 1;
+        return;
+      }
+
+      edgeSegments.set(key, {
+        count: 1,
+        end: end.point,
+        endKey: end.key,
+        edgeKey,
+        normal: normal.clone(),
+        objectId,
+        start: start.point,
+        startKey: start.key,
+      });
+    });
+  }
+
+  const segmentPositions: number[] = [];
+  const segmentColors: number[] = [];
+  const looseEdgeKeys = new Set<string>();
+  const looseEdgeKeysByVertexKey = new Map<string, Set<string>>();
+  const looseEdgeLoopById = new Map<number, LooseEdgeLoop>();
+  const looseEdgeSegmentsByKey = new Map<string, LooseEdgeSegment>();
+  const looseEdgeRenderCacheSourceByObjectId = new Map<
+    number,
+    { colors: number[]; positions: number[] }
+  >();
+  const red = new THREE.Color(looseEdgeColor);
+
+  edgeSegments.forEach((edge, key) => {
+    if (edge.count !== 1) {
+      return;
+    }
+
+    const shouldRenderSegment =
+      selectedObjectId != null &&
+      !hiddenObjectIds.has(selectedObjectId) &&
+      edge.objectId === selectedObjectId;
+    const segmentIndex = shouldRenderSegment ? segmentPositions.length / 6 : -1;
+
+    looseEdgeKeys.add(key);
+    looseEdgeSegmentsByKey.set(key, {
+      end: edge.end,
+      endKey: edge.endKey,
+      edgeKey: edge.edgeKey,
+      index: segmentIndex,
+      loopId: -1,
+      normal: edge.normal,
+      objectId: edge.objectId,
+      start: edge.start,
+      startKey: edge.startKey,
+    });
+
+    [edge.startKey, edge.endKey].forEach((vertexKey) => {
+      const connectedKeys = looseEdgeKeysByVertexKey.get(vertexKey);
+
+      if (connectedKeys) {
+        connectedKeys.add(key);
+      } else {
+        looseEdgeKeysByVertexKey.set(vertexKey, new Set([key]));
+      }
+    });
+
+    let renderCacheSource = looseEdgeRenderCacheSourceByObjectId.get(edge.objectId);
+
+    if (!renderCacheSource) {
+      renderCacheSource = { colors: [], positions: [] };
+      looseEdgeRenderCacheSourceByObjectId.set(edge.objectId, renderCacheSource);
+    }
+
+    renderCacheSource.positions.push(
+      edge.start.x,
+      edge.start.y,
+      edge.start.z,
+      edge.end.x,
+      edge.end.y,
+      edge.end.z,
+    );
+    renderCacheSource.colors.push(red.r, red.g, red.b, red.r, red.g, red.b);
+
+    if (shouldRenderSegment) {
+      segmentPositions.push(
+        edge.start.x,
+        edge.start.y,
+        edge.start.z,
+        edge.end.x,
+        edge.end.y,
+        edge.end.z,
+      );
+      segmentColors.push(red.r, red.g, red.b, red.r, red.g, red.b);
+    }
+  });
+
+  const looseEdgeRenderCacheByObjectId = new Map<number, LooseEdgeRenderCache>();
+
+  looseEdgeRenderCacheSourceByObjectId.forEach((cache, objectId) => {
+    looseEdgeRenderCacheByObjectId.set(objectId, {
+      colors: new Float32Array(cache.colors),
+      positions: new Float32Array(cache.positions),
+      segmentCount: cache.positions.length / 6,
+    });
+  });
+
+  let nextLoopId = 0;
+
+  looseEdgeSegmentsByKey.forEach((seedSegment, seedKey) => {
+    if (seedSegment.loopId >= 0) {
+      return;
+    }
+
+    const loopId = nextLoopId;
+    const loopPositions: number[] = [];
+    const pendingKeys = [seedKey];
+    const segmentIndexes: number[] = [];
+    const segmentKeys: string[] = [];
+
+    nextLoopId += 1;
+
+    while (pendingKeys.length > 0) {
+      const key = pendingKeys.pop();
+
+      if (!key) {
+        continue;
+      }
+
+      const segment = looseEdgeSegmentsByKey.get(key);
+
+      if (!segment || segment.loopId >= 0) {
+        continue;
+      }
+
+      segment.loopId = loopId;
+      segmentKeys.push(key);
+      if (segment.index >= 0) {
+        segmentIndexes.push(segment.index);
+      }
+      loopPositions.push(
+        segment.start.x,
+        segment.start.y,
+        segment.start.z,
+        segment.end.x,
+        segment.end.y,
+        segment.end.z,
+      );
+
+      [segment.startKey, segment.endKey].forEach((vertexKey) => {
+        looseEdgeKeysByVertexKey.get(vertexKey)?.forEach((connectedKey) => {
+          const connectedSegment = looseEdgeSegmentsByKey.get(connectedKey);
+
+          if (connectedSegment && connectedSegment.loopId < 0) {
+            pendingKeys.push(connectedKey);
+          }
+        });
+      });
+    }
+
+    looseEdgeLoopById.set(loopId, {
+      id: loopId,
+      objectId: seedSegment.objectId,
+      positions: new Float32Array(loopPositions),
+      segmentIndexes,
+      segmentKeys,
+    });
+  });
+
+  geometry.setPositions(segmentPositions);
+  geometry.setColors(segmentColors);
+  geometry.userData.segmentCount = segmentPositions.length / 6;
+  mesh.userData.looseEdgeKeys = looseEdgeKeys;
+  mesh.userData.looseEdgeKeysByVertexKey = looseEdgeKeysByVertexKey;
+  mesh.userData.looseEdgeLoopById = looseEdgeLoopById;
+  mesh.userData.looseEdgeRenderCacheByObjectId = looseEdgeRenderCacheByObjectId;
+  mesh.userData.looseEdgeSegmentsByKey = looseEdgeSegmentsByKey;
+
+  return geometry;
+}
+
+function createLooseEdgeRenderGeometryFromCache(
+  mesh: THREE.Mesh,
+  hiddenObjectIds: Set<number>,
+  selectedObjectId: number | null,
+) {
+  const geometry = new LineSegmentsGeometry();
+  const renderCacheByObjectId = mesh.userData.looseEdgeRenderCacheByObjectId as
+    | Map<number, LooseEdgeRenderCache>
+    | undefined;
+  const segmentsByKey = mesh.userData.looseEdgeSegmentsByKey as
+    | Map<string, LooseEdgeSegment>
+    | undefined;
+  const loopsById = mesh.userData.looseEdgeLoopById as Map<number, LooseEdgeLoop> | undefined;
+
+  if (selectedObjectId == null || hiddenObjectIds.has(selectedObjectId)) {
+    geometry.userData.segmentCount = 0;
+    return geometry;
+  }
+
+  const renderCache = renderCacheByObjectId?.get(selectedObjectId);
+
+  if (renderCacheByObjectId instanceof Map) {
+    if (renderCache) {
+      geometry.setPositions(renderCache.positions);
+      geometry.setColors(renderCache.colors);
+      geometry.userData.segmentCount = renderCache.segmentCount;
+      return geometry;
+    }
+
+    geometry.userData.segmentCount = 0;
+    return geometry;
+  }
+
+  if (!(segmentsByKey instanceof Map) || !(loopsById instanceof Map)) {
+    geometry.userData.segmentCount = 0;
+    return geometry;
+  }
+
+  return createLooseEdgeGeometry(mesh, hiddenObjectIds, selectedObjectId);
+}
+
+function refreshLooseEdgeOverlay(
+  mesh: THREE.Mesh,
+  hiddenObjectIds: Set<number>,
+  selectedObjectId: number | null,
+  rebuildCache = true,
+) {
+  const looseEdgeOverlays = [
+    mesh.userData.obstructedLooseEdgeOverlay as LineSegments2 | undefined,
+    mesh.userData.looseEdgeOverlay as LineSegments2 | undefined,
+  ];
+  const hasLooseEdgeCache = mesh.userData.looseEdgeSegmentsByKey instanceof Map;
+  const geometry =
+    rebuildCache || !hasLooseEdgeCache
+      ? createLooseEdgeGeometry(mesh, hiddenObjectIds, selectedObjectId)
+      : createLooseEdgeRenderGeometryFromCache(mesh, hiddenObjectIds, selectedObjectId);
+  const segmentCount = geometry.userData.segmentCount ?? 0;
+
+  looseEdgeOverlays.forEach((looseEdges, index) => {
+    if (!looseEdges) {
+      return;
+    }
+
+    looseEdges.geometry.dispose();
+    looseEdges.geometry = index === 0 ? geometry : geometry.clone();
+    looseEdges.geometry.userData.segmentCount = segmentCount;
+    looseEdges.visible = segmentCount > 0;
+  });
+}
+
+function refreshLooseEdgeOverlays(
+  model: THREE.Object3D,
+  hiddenObjectIds: Set<number>,
+  selectedObjectId: number | null,
+  rebuildCache = true,
+) {
+  model.traverse((child) => {
+    if (isSelectableMesh(child)) {
+      refreshLooseEdgeOverlay(child, hiddenObjectIds, selectedObjectId, rebuildCache);
     }
   });
 }
@@ -609,16 +1474,138 @@ function getTriangleEdgeFace(vertices: TriangleVertex[], edgeKey: string) {
   return null;
 }
 
-function createHoverEdgeGeometry(start: THREE.Vector3, end: THREE.Vector3) {
-  const geometry = new LineGeometry();
+function getLooseEdgeLoop(mesh: THREE.Mesh, loopId: number | undefined) {
+  const loopsById = mesh.userData.looseEdgeLoopById;
 
-  geometry.setPositions([start.x, start.y, start.z, end.x, end.y, end.z]);
+  if (loopId == null || !(loopsById instanceof Map)) {
+    return null;
+  }
+
+  return (loopsById.get(loopId) as LooseEdgeLoop | undefined) ?? null;
+}
+
+function isSameLooseEdgeLoop(first: HoveredEdge | null, second: HoveredEdge | null) {
+  return (
+    first?.isLooseEdge === true &&
+    second?.isLooseEdge === true &&
+    first.mesh === second.mesh &&
+    first.objectId === second.objectId &&
+    first.loopId === second.loopId
+  );
+}
+
+function setLooseEdgeLoopColor(mesh: THREE.Mesh, loopId: number | undefined, colorValue: number) {
+  const loop = getLooseEdgeLoop(mesh, loopId);
+
+  if (!loop) {
+    return;
+  }
+
+  const color = new THREE.Color(colorValue);
+  const overlays = [
+    mesh.userData.obstructedLooseEdgeOverlay as LineSegments2 | undefined,
+    mesh.userData.looseEdgeOverlay as LineSegments2 | undefined,
+  ];
+
+  overlays.forEach((overlay) => {
+    if (!overlay) {
+      return;
+    }
+
+    const startColor = overlay.geometry.getAttribute("instanceColorStart");
+    const endColor = overlay.geometry.getAttribute("instanceColorEnd");
+
+    if (!startColor || !endColor) {
+      return;
+    }
+
+    loop.segmentIndexes.forEach((segmentIndex) => {
+      startColor.setXYZ(segmentIndex, color.r, color.g, color.b);
+      endColor.setXYZ(segmentIndex, color.r, color.g, color.b);
+    });
+
+    startColor.needsUpdate = true;
+    endColor.needsUpdate = true;
+  });
+}
+
+function getScreenPoint(
+  point: THREE.Vector3,
+  camera: THREE.Camera,
+  viewport: Pick<DOMRect, "height" | "left" | "top" | "width">,
+) {
+  const projected = point.clone().project(camera);
+
+  if (projected.z < -1 || projected.z > 1) {
+    return null;
+  }
+
+  return {
+    x: viewport.left + ((projected.x + 1) / 2) * viewport.width,
+    y: viewport.top + ((1 - projected.y) / 2) * viewport.height,
+  };
+}
+
+function getPointToSegmentDistance(
+  pointX: number,
+  pointY: number,
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
+) {
+  const deltaX = endX - startX;
+  const deltaY = endY - startY;
+  const lengthSq = deltaX * deltaX + deltaY * deltaY;
+
+  if (lengthSq === 0) {
+    return Math.hypot(pointX - startX, pointY - startY);
+  }
+
+  const t = THREE.MathUtils.clamp(
+    ((pointX - startX) * deltaX + (pointY - startY) * deltaY) / lengthSq,
+    0,
+    1,
+  );
+  const closestX = startX + deltaX * t;
+  const closestY = startY + deltaY * t;
+
+  return Math.hypot(pointX - closestX, pointY - closestY);
+}
+
+function createHoverEdgeGeometry(edge: HoveredEdge) {
+  const geometry = new LineSegmentsGeometry();
+  const loop = edge.isLooseEdge ? getLooseEdgeLoop(edge.mesh, edge.loopId) : null;
+  const segmentPositions: number[] = [];
+
+  if (edge.boundaryPositions) {
+    geometry.setPositions(edge.boundaryPositions);
+
+    return geometry;
+  }
+
+  if (loop) {
+    geometry.setPositions(loop.positions);
+
+    return geometry;
+  }
+
+  segmentPositions.push(
+    edge.start.x,
+    edge.start.y,
+    edge.start.z,
+    edge.end.x,
+    edge.end.y,
+    edge.end.z,
+  );
+
+  geometry.setPositions(segmentPositions);
 
   return geometry;
 }
 
 function clearHoverEdgeOverlay(edge: HoveredEdge | null) {
-  const hoverEdge = edge?.mesh.userData.hoverEdgeOverlay as Line2 | undefined;
+  const hoverEdge = edge?.mesh.userData.hoverEdgeOverlay as LineSegments2 | undefined;
 
   if (hoverEdge) {
     hoverEdge.visible = false;
@@ -626,22 +1613,641 @@ function clearHoverEdgeOverlay(edge: HoveredEdge | null) {
 }
 
 function setHoverEdgeOverlay(edge: HoveredEdge) {
-  const hoverEdge = edge.mesh.userData.hoverEdgeOverlay as Line2 | undefined;
+  const hoverEdge = edge.mesh.userData.hoverEdgeOverlay as LineSegments2 | undefined;
+  const isLoopHover = edge.isLooseEdge === true || edge.isSelectionBoundary === true;
 
   if (!hoverEdge) {
     return;
   }
 
   hoverEdge.geometry.dispose();
-  hoverEdge.geometry = createHoverEdgeGeometry(edge.start, edge.end);
+  hoverEdge.geometry = createHoverEdgeGeometry(edge);
+  hoverEdge.renderOrder = isLoopHover ? looseEdgeHoverRenderOrder : hoverEdgeRenderOrder;
+
+  if (hoverEdge.material instanceof LineMaterial) {
+    hoverEdge.material.depthTest = false;
+    hoverEdge.material.color.setHex(isLoopHover ? looseEdgeHoverColor : hoverEdgeColor);
+    hoverEdge.material.linewidth = isLoopHover ? looseEdgeUiOverlayLineWidth : hoverEdgeLineWidth;
+  }
+
   hoverEdge.visible = true;
+}
+
+function createLooseEdgeLoopOverlay(edge: HoveredEdge, colorValue: number) {
+  const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
+
+  if (!loop || loop.positions.length === 0) {
+    return null;
+  }
+
+  const geometry = new LineSegmentsGeometry();
+
+  geometry.setPositions(loop.positions);
+
+  const overlay = new LineSegments2(
+    geometry,
+    new LineMaterial({
+      color: colorValue,
+      depthTest: false,
+      depthWrite: false,
+      linewidth: looseEdgeUiOverlayLineWidth,
+    }),
+  );
+  const hoverOverlay = edge.mesh.userData.hoverEdgeOverlay as LineSegments2 | undefined;
+
+  overlay.name = "selected-loose-edge-loop-overlay";
+  overlay.position.copy(edge.mesh.position);
+  overlay.quaternion.copy(edge.mesh.quaternion);
+  overlay.scale.copy(edge.mesh.scale);
+  overlay.matrix.copy(edge.mesh.matrix);
+  overlay.matrixAutoUpdate = edge.mesh.matrixAutoUpdate;
+  overlay.renderOrder = looseEdgeHoverRenderOrder;
+  overlay.userData.isLooseEdgeSelectionOverlay = true;
+
+  if (hoverOverlay?.material instanceof LineMaterial && overlay.material instanceof LineMaterial) {
+    overlay.material.resolution.copy(hoverOverlay.material.resolution);
+  }
+
+  return overlay;
+}
+
+function getLoopFillPointKey(point: THREE.Vector3) {
+  const precision = 100000;
+
+  return [
+    Math.round(point.x * precision),
+    Math.round(point.y * precision),
+    Math.round(point.z * precision),
+  ].join(",");
+}
+
+function getLooseEdgeLoopCacheKey(mesh: THREE.Mesh, loop: LooseEdgeLoop) {
+  return `${mesh.uuid}:${[...loop.segmentKeys].sort().join("~")}`;
+}
+
+function getLooseEdgeLoopFillKey(edge: HoveredEdge) {
+  const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
+
+  return loop
+    ? getLooseEdgeLoopCacheKey(edge.mesh, loop)
+    : `${edge.mesh.uuid}:${edge.objectId}:${edge.loopId ?? -1}`;
+}
+
+function getMeshObjectLocalCenter(mesh: THREE.Mesh, objectId: number) {
+  const position = mesh.geometry.getAttribute("position");
+  const objectIds = getTriangleObjectIds(mesh);
+  const center = new THREE.Vector3();
+  let vertexCount = 0;
+
+  if (!(position instanceof THREE.BufferAttribute)) {
+    return null;
+  }
+
+  for (let index = 0; index < position.count; index += 3) {
+    const triangleIndex = index / 3;
+
+    if ((objectIds?.[triangleIndex] ?? defaultObjectId) !== objectId) {
+      continue;
+    }
+
+    center.add(new THREE.Vector3().fromBufferAttribute(position, index));
+    center.add(new THREE.Vector3().fromBufferAttribute(position, index + 1));
+    center.add(new THREE.Vector3().fromBufferAttribute(position, index + 2));
+    vertexCount += 3;
+  }
+
+  return vertexCount > 0 ? center.multiplyScalar(1 / vertexCount) : null;
+}
+
+function getMeshObjectProjectionSize(mesh: THREE.Mesh, objectId: number, axis: THREE.Vector3) {
+  const position = mesh.geometry.getAttribute("position");
+  const objectIds = getTriangleObjectIds(mesh);
+  const point = new THREE.Vector3();
+  let min = Infinity;
+  let max = -Infinity;
+
+  if (!(position instanceof THREE.BufferAttribute)) {
+    return 0;
+  }
+
+  for (let index = 0; index < position.count; index += 3) {
+    const triangleIndex = index / 3;
+
+    if ((objectIds?.[triangleIndex] ?? defaultObjectId) !== objectId) {
+      continue;
+    }
+
+    for (let offset = 0; offset < 3; offset += 1) {
+      point.fromBufferAttribute(position, index + offset);
+
+      const projection = point.dot(axis);
+
+      min = Math.min(min, projection);
+      max = Math.max(max, projection);
+    }
+  }
+
+  return Number.isFinite(min) && Number.isFinite(max) ? Math.max(max - min, 0) : 0;
+}
+
+function pushLoopFillTriangle(
+  vertices: number[],
+  first: THREE.Vector3,
+  second: THREE.Vector3,
+  third: THREE.Vector3,
+  desiredNormal: THREE.Vector3 | null,
+) {
+  const triangleNormal = second.clone().sub(first).cross(third.clone().sub(first));
+
+  if (triangleNormal.lengthSq() === 0) {
+    return;
+  }
+
+  const shouldFlip =
+    desiredNormal != null && desiredNormal.lengthSq() > 0
+      ? triangleNormal.dot(desiredNormal) < 0
+      : false;
+  const orderedPoints = shouldFlip ? [first, third, second] : [first, second, third];
+
+  orderedPoints.forEach((point) => {
+    vertices.push(point.x, point.y, point.z);
+  });
+}
+
+function createLoopFillGeometry(vertices: number[]) {
+  if (vertices.length === 0) {
+    return null;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+
+  return geometry;
+}
+
+function getLoopTriangleOutwardNormal(
+  first: THREE.Vector3,
+  second: THREE.Vector3,
+  third: THREE.Vector3,
+  objectCenter: THREE.Vector3 | null,
+) {
+  if (!objectCenter) {
+    return null;
+  }
+
+  return first
+    .clone()
+    .add(second)
+    .add(third)
+    .multiplyScalar(1 / 3)
+    .sub(objectCenter);
+}
+
+function getLooseEdgeLoopFillData(edge: HoveredEdge): LooseEdgeLoopFillData | null {
+  const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
+  const segmentsByKey = edge.mesh.userData.looseEdgeSegmentsByKey as
+    | Map<string, LooseEdgeSegment>
+    | undefined;
+
+  if (!loop || loop.positions.length === 0) {
+    return null;
+  }
+
+  const pointIndexByKey = new Map<string, number>();
+  const points: THREE.Vector3[] = [];
+  const segments: LooseEdgeLoopFillSegment[] = [];
+
+  const getPointIndex = (point: THREE.Vector3) => {
+    const key = getLoopFillPointKey(point);
+    const existingIndex = pointIndexByKey.get(key);
+
+    if (existingIndex != null) {
+      return existingIndex;
+    }
+
+    const pointIndex = points.length;
+
+    points.push(point.clone());
+    pointIndexByKey.set(key, pointIndex);
+
+    return pointIndex;
+  };
+
+  for (let index = 0; index < loop.positions.length; index += 6) {
+    const start = new THREE.Vector3(
+      loop.positions[index],
+      loop.positions[index + 1],
+      loop.positions[index + 2],
+    );
+    const end = new THREE.Vector3(
+      loop.positions[index + 3],
+      loop.positions[index + 4],
+      loop.positions[index + 5],
+    );
+
+    if (start.distanceToSquared(end) === 0) {
+      continue;
+    }
+
+    segments.push({
+      end,
+      endIndex: getPointIndex(end),
+      start,
+      startIndex: getPointIndex(start),
+    });
+  }
+
+  if (points.length < 3 || segments.length === 0) {
+    return null;
+  }
+
+  const center = points
+    .reduce((sum, point) => sum.add(point), new THREE.Vector3())
+    .multiplyScalar(1 / points.length);
+  const referenceNormal = new THREE.Vector3();
+  const outsideNormal = new THREE.Vector3();
+  const objectCenter = getMeshObjectLocalCenter(edge.mesh, edge.objectId);
+
+  if (objectCenter) {
+    outsideNormal.subVectors(center, objectCenter);
+  }
+
+  if (segmentsByKey instanceof Map) {
+    loop.segmentKeys.forEach((key) => {
+      const segment = segmentsByKey.get(key);
+
+      if (segment) {
+        referenceNormal.add(segment.normal);
+      }
+    });
+  }
+
+  if (referenceNormal.lengthSq() > 0 && outsideNormal.lengthSq() > 0) {
+    if (referenceNormal.dot(outsideNormal) < 0) {
+      referenceNormal.negate();
+    }
+  }
+
+  if (referenceNormal.lengthSq() === 0 && outsideNormal.lengthSq() > 0) {
+    referenceNormal.copy(outsideNormal);
+  }
+
+  if (referenceNormal.lengthSq() === 0) {
+    segments.forEach((segment) => {
+      referenceNormal.add(segment.start.clone().sub(center).cross(segment.end.clone().sub(center)));
+    });
+  }
+
+  if (referenceNormal.lengthSq() > 0 && outsideNormal.lengthSq() > 0) {
+    if (referenceNormal.dot(outsideNormal) < 0) {
+      referenceNormal.negate();
+    }
+  }
+
+  if (referenceNormal.lengthSq() > 0) {
+    referenceNormal.normalize();
+  }
+
+  return {
+    center,
+    objectCenter,
+    points,
+    referenceNormal,
+    segments,
+  };
+}
+
+function getLooseEdgeLoopCapAxisData(
+  edge: HoveredEdge,
+  mode: LooseEdgeLoopMode,
+  normalTarget: THREE.Vector3 | null = null,
+): LooseEdgeLoopCapAxisData | null {
+  const data = getLooseEdgeLoopFillData(edge);
+
+  if (!data || mode === "none") {
+    return null;
+  }
+
+  let axis: THREE.Vector3 | null;
+
+  if (isNormalTargetLoopMode(mode) && normalTarget) {
+    axis = normalTarget.clone().sub(data.center);
+
+    if (axis.lengthSq() < 0.000001) {
+      axis = getLooseEdgeLoopExtrusionAxis(mode, data);
+    }
+  } else if (mode === "fill") {
+    axis = data.referenceNormal.clone();
+  } else {
+    axis = getLooseEdgeLoopExtrusionAxis(mode, data);
+  }
+
+  if (!axis || axis.lengthSq() === 0) {
+    return null;
+  }
+
+  axis.normalize();
+
+  const projectionSize = getMeshObjectProjectionSize(edge.mesh, edge.objectId, axis);
+  const loopSize = new THREE.Box3().setFromPoints(data.points).getSize(new THREE.Vector3());
+  const fallbackOffset = Math.max(loopSize.x, loopSize.y, loopSize.z, targetModelSize * 0.05);
+
+  return {
+    axis,
+    data,
+    defaultOffset:
+      mode === "fill" ? 0 : projectionSize > 0.000001 ? projectionSize : fallbackOffset,
+  };
+}
+
+function getLooseEdgeLoopCapOffsetBounds(
+  edge: HoveredEdge,
+  mode: LooseEdgeLoopMode,
+  axisData: LooseEdgeLoopCapAxisData,
+) {
+  const projectionSize = getMeshObjectProjectionSize(edge.mesh, edge.objectId, axisData.axis);
+  const span = Math.max(
+    projectionSize,
+    Math.abs(axisData.defaultOffset),
+    targetModelSize * 0.25,
+    0.1,
+  );
+
+  return mode === "fill"
+    ? { max: span, min: -span }
+    : { max: Math.max(span * 2, axisData.defaultOffset), min: 0.001 };
+}
+
+function clampLooseEdgeLoopCapOffset(
+  edge: HoveredEdge,
+  mode: LooseEdgeLoopMode,
+  offset: number,
+  normalTarget: THREE.Vector3 | null = null,
+) {
+  const axisData = getLooseEdgeLoopCapAxisData(edge, mode, normalTarget);
+
+  if (!axisData) {
+    return offset;
+  }
+
+  const bounds = getLooseEdgeLoopCapOffsetBounds(edge, mode, axisData);
+
+  return THREE.MathUtils.clamp(offset, bounds.min, bounds.max);
+}
+
+function createLooseEdgeLoopFlatFillGeometry(
+  data: LooseEdgeLoopFillData,
+  axis: THREE.Vector3,
+  capOffset: number,
+) {
+  const vertices: number[] = [];
+  const desiredNormal = axis.lengthSq() > 0 ? axis : null;
+  const capCenter = data.center.clone().addScaledVector(axis, capOffset);
+
+  data.segments.forEach((segment) => {
+    pushLoopFillTriangle(
+      vertices,
+      capCenter,
+      segment.start.clone().addScaledVector(axis, capOffset),
+      segment.end.clone().addScaledVector(axis, capOffset),
+      desiredNormal,
+    );
+  });
+
+  return createLoopFillGeometry(vertices);
+}
+
+function getLooseEdgeLoopExtrusionAxis(mode: LooseEdgeLoopMode, data: LooseEdgeLoopFillData) {
+  const axis = new THREE.Vector3();
+
+  if (mode === "extrude-x" || mode === "cylinder-x") {
+    axis.set(1, 0, 0);
+  } else if (mode === "extrude-y" || mode === "cylinder-y") {
+    axis.set(0, 1, 0);
+  } else if (mode === "extrude-z" || mode === "cylinder-z") {
+    axis.set(0, 0, 1);
+  } else if (mode === "extrude-normal" || mode === "cylinder-normal") {
+    axis.copy(data.referenceNormal);
+  }
+
+  if (axis.lengthSq() === 0 && data.objectCenter) {
+    axis.subVectors(data.center, data.objectCenter);
+  }
+
+  if (axis.lengthSq() === 0) {
+    return null;
+  }
+
+  axis.normalize();
+
+  if (data.objectCenter && axis.dot(data.center.clone().sub(data.objectCenter)) < 0) {
+    axis.negate();
+  }
+
+  return axis;
+}
+
+function createLooseEdgeLoopExtrusionGeometry(
+  data: LooseEdgeLoopFillData,
+  axis: THREE.Vector3,
+  capOffset: number,
+) {
+  if (axis.lengthSq() === 0) {
+    return null;
+  }
+
+  const extrusionLength = capOffset;
+
+  if (extrusionLength <= 0) {
+    return null;
+  }
+
+  const vertices: number[] = [];
+  const capCenter = data.center.clone().addScaledVector(axis, extrusionLength);
+  const capPoints = data.points.map((point) => {
+    const capPoint = point.clone().addScaledVector(axis, extrusionLength);
+    const planeDistance = capPoint.clone().sub(capCenter).dot(axis);
+
+    return capPoint.addScaledVector(axis, -planeDistance);
+  });
+
+  data.segments.forEach((segment) => {
+    const capStart = capPoints[segment.startIndex];
+    const capEnd = capPoints[segment.endIndex];
+
+    if (!capStart || !capEnd) {
+      return;
+    }
+
+    pushLoopFillTriangle(
+      vertices,
+      segment.start,
+      segment.end,
+      capEnd,
+      getLoopTriangleOutwardNormal(segment.start, segment.end, capEnd, data.objectCenter),
+    );
+    pushLoopFillTriangle(
+      vertices,
+      segment.start,
+      capEnd,
+      capStart,
+      getLoopTriangleOutwardNormal(segment.start, capEnd, capStart, data.objectCenter),
+    );
+    pushLoopFillTriangle(vertices, capCenter, capStart, capEnd, axis);
+  });
+
+  return createLoopFillGeometry(vertices);
+}
+
+function getLooseEdgeLoopCylinderRadius(data: LooseEdgeLoopFillData) {
+  const minRadius = data.points.reduce(
+    (radius, point) => Math.min(radius, point.distanceTo(data.center)),
+    Number.POSITIVE_INFINITY,
+  );
+
+  return Number.isFinite(minRadius) && minRadius > 0
+    ? minRadius * looseEdgeLoopCylinderRadiusScale
+    : 0;
+}
+
+function getPerpendicularBasis(axis: THREE.Vector3) {
+  const helper = Math.abs(axis.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const tangent = new THREE.Vector3().crossVectors(axis, helper).normalize();
+  const bitangent = new THREE.Vector3().crossVectors(axis, tangent).normalize();
+
+  return { bitangent, tangent };
+}
+
+function createLooseEdgeLoopCylinderGeometry(
+  data: LooseEdgeLoopFillData,
+  axis: THREE.Vector3,
+  capOffset: number,
+) {
+  if (axis.lengthSq() === 0) {
+    return null;
+  }
+
+  const vertices: number[] = [];
+  const capNormal = data.referenceNormal.lengthSq() > 0 ? data.referenceNormal : axis;
+
+  data.segments.forEach((segment) => {
+    pushLoopFillTriangle(vertices, data.center, segment.start, segment.end, capNormal);
+  });
+
+  if (capOffset <= 0) {
+    return createLoopFillGeometry(vertices);
+  }
+
+  const radius = getLooseEdgeLoopCylinderRadius(data);
+
+  if (radius <= 0) {
+    return createLoopFillGeometry(vertices);
+  }
+
+  const { bitangent, tangent } = getPerpendicularBasis(axis);
+  const topCenter = data.center.clone().addScaledVector(axis, capOffset);
+  const basePoints: THREE.Vector3[] = [];
+  const topPoints: THREE.Vector3[] = [];
+  const radialDirections: THREE.Vector3[] = [];
+
+  for (let index = 0; index < looseEdgeLoopCylinderSegments; index += 1) {
+    const angle = (index / looseEdgeLoopCylinderSegments) * Math.PI * 2;
+    const radialDirection = tangent
+      .clone()
+      .multiplyScalar(Math.cos(angle))
+      .addScaledVector(bitangent, Math.sin(angle))
+      .normalize();
+    const basePoint = data.center.clone().addScaledVector(radialDirection, radius);
+
+    radialDirections.push(radialDirection);
+    basePoints.push(basePoint);
+    topPoints.push(basePoint.clone().addScaledVector(axis, capOffset));
+  }
+
+  for (let index = 0; index < looseEdgeLoopCylinderSegments; index += 1) {
+    const nextIndex = (index + 1) % looseEdgeLoopCylinderSegments;
+    const baseStart = basePoints[index];
+    const baseEnd = basePoints[nextIndex];
+    const topStart = topPoints[index];
+    const topEnd = topPoints[nextIndex];
+    const sideNormal = radialDirections[index].clone().add(radialDirections[nextIndex]).normalize();
+
+    if (!baseStart || !baseEnd || !topStart || !topEnd) {
+      continue;
+    }
+
+    pushLoopFillTriangle(vertices, baseStart, baseEnd, topEnd, sideNormal);
+    pushLoopFillTriangle(vertices, baseStart, topEnd, topStart, sideNormal);
+    pushLoopFillTriangle(vertices, topCenter, topStart, topEnd, axis);
+  }
+
+  return createLoopFillGeometry(vertices);
+}
+
+function createLooseEdgeLoopFill(
+  edge: HoveredEdge,
+  mode: LooseEdgeLoopMode,
+  capOffset: number,
+  normalTarget: THREE.Vector3 | null = null,
+) {
+  const axisData = getLooseEdgeLoopCapAxisData(edge, mode, normalTarget);
+
+  if (!axisData) {
+    return null;
+  }
+
+  const geometry =
+    mode === "fill"
+      ? createLooseEdgeLoopFlatFillGeometry(axisData.data, axisData.axis, capOffset)
+      : isCylinderLoopMode(mode)
+        ? createLooseEdgeLoopCylinderGeometry(axisData.data, axisData.axis, capOffset)
+        : createLooseEdgeLoopExtrusionGeometry(axisData.data, axisData.axis, capOffset);
+
+  if (!geometry) {
+    return null;
+  }
+
+  const fill = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({
+      color: getSeparatedObjectColor(edge.objectId),
+      metalness: 0,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+      roughness: 0.82,
+      side: THREE.DoubleSide,
+    }),
+  );
+
+  fill.name = "loose-edge-loop-fill-overlay";
+  fill.position.copy(edge.mesh.position);
+  fill.quaternion.copy(edge.mesh.quaternion);
+  fill.scale.copy(edge.mesh.scale);
+  fill.matrix.copy(edge.mesh.matrix);
+  fill.matrixAutoUpdate = edge.mesh.matrixAutoUpdate;
+  fill.userData.isLooseEdgeFillOverlay = true;
+  fill.userData.fillKey = getLooseEdgeLoopFillKey(edge);
+  fill.userData.loopId = edge.loopId;
+  fill.userData.objectId = edge.objectId;
+  fill.userData.sourceMeshUuid = edge.mesh.uuid;
+
+  return fill;
 }
 
 function updateHoverEdgeResolution(model: THREE.Object3D, width: number, height: number) {
   model.traverse((child) => {
     if (
       (child.userData.isHoverEdgeOverlay !== true &&
-        child.userData.isLinkedFaceSelectionOverlay !== true) ||
+        child.userData.isLooseEdgeOverlay !== true &&
+        child.userData.isLooseEdgeSelectionOverlay !== true &&
+        child.userData.isSelectedObjectOutlineOverlay !== true &&
+        child.userData.isLinkedFaceSelectionOverlay !== true &&
+        child.userData.isSelectionBoundaryLoopOverlay !== true) ||
       !isDisposableDrawObject(child)
     ) {
       return;
@@ -649,6 +2255,17 @@ function updateHoverEdgeResolution(model: THREE.Object3D, width: number, height:
 
     if (child.material instanceof LineMaterial) {
       child.material.resolution.set(width, height);
+    }
+
+    if (
+      child.userData.isSelectedObjectOutlineOverlay === true &&
+      child.material instanceof THREE.ShaderMaterial
+    ) {
+      const resolution = child.material.uniforms.resolution?.value;
+
+      if (resolution instanceof THREE.Vector2) {
+        resolution.set(width, height);
+      }
     }
   });
 }
@@ -668,6 +2285,8 @@ function getHoveredEdgeFromHit(
   }
 
   const triangle = getTriangleVertices(position, intersection.faceIndex * 3);
+  const objectIds = getTriangleObjectIds(mesh);
+  const objectId = objectIds?.[intersection.faceIndex] ?? defaultObjectId;
 
   if (!triangle) {
     return null;
@@ -705,6 +2324,7 @@ function getHoveredEdgeFromHit(
       end: end.point.clone(),
       key: [start.key, end.key].sort().join("|"),
       mesh,
+      objectId,
       start: start.point.clone(),
     };
   });
@@ -865,19 +2485,27 @@ function getTopologyEdgeNormalAngle(
   return getEdgeNormalAngle(faces);
 }
 
-function getObjectConnectedComponents(
+async function getObjectConnectedComponentsAsync(
   topology: MeshTopology,
   objectIds: Uint32Array,
   objectId: number,
+  onProgress: SeparationProgressReporter,
 ) {
   const unvisitedTriangleIndexes = new Set<number>();
   const components: number[][] = [];
 
-  objectIds.forEach((triangleObjectId, triangleIndex) => {
-    if (triangleObjectId === objectId && topology.triangles[triangleIndex]) {
+  for (let triangleIndex = 0; triangleIndex < objectIds.length; triangleIndex += 1) {
+    if (objectIds[triangleIndex] === objectId && topology.triangles[triangleIndex]) {
       unvisitedTriangleIndexes.add(triangleIndex);
     }
-  });
+
+    if (triangleIndex > 0 && triangleIndex % separationProgressCheckInterval === 0) {
+      await onProgress(`Scanning object ${objectId}: ${triangleIndex}/${objectIds.length}`);
+    }
+  }
+
+  const totalTriangles = unvisitedTriangleIndexes.size;
+  let visitedTriangles = 0;
 
   while (unvisitedTriangleIndexes.size > 0) {
     const startTriangleIndex = unvisitedTriangleIndexes.values().next().value as number | undefined;
@@ -900,6 +2528,7 @@ function getObjectConnectedComponents(
       }
 
       component.push(triangleIndex);
+      visitedTriangles += 1;
 
       triangle.edgeKeys.forEach((edgeKey) => {
         topology.edgeToTriangles.get(edgeKey)?.forEach((edgeTriangleIndex) => {
@@ -915,6 +2544,10 @@ function getObjectConnectedComponents(
           stack.push(edgeTriangleIndex);
         });
       });
+
+      if (visitedTriangles % separationProgressCheckInterval === 0) {
+        await onProgress(`Scanning object ${objectId}: ${visitedTriangles}/${totalTriangles}`);
+      }
     }
 
     components.push(component);
@@ -923,34 +2556,51 @@ function getObjectConnectedComponents(
   return components;
 }
 
-function separateLooseObjectParts(
+async function separateLooseObjectPartsAsync(
   topology: MeshTopology,
   objectIds: Uint32Array,
   objectIdsToScan: number[],
   getNextObjectId: () => number,
+  onProgress: SeparationProgressReporter,
 ) {
-  new Set(objectIdsToScan).forEach((objectId) => {
-    const components = getObjectConnectedComponents(topology, objectIds, objectId);
+  for (const objectId of new Set(objectIdsToScan)) {
+    await onProgress(`Finding loose parts in object ${objectId}`);
+
+    const components = await getObjectConnectedComponentsAsync(
+      topology,
+      objectIds,
+      objectId,
+      onProgress,
+    );
 
     if (components.length <= 1) {
-      return;
+      continue;
     }
 
-    components
+    const looseComponents = components
       .sort((first, second) => second.length - first.length)
-      .slice(1)
-      .forEach((component) => {
-        if (component.length < minLoosePartTriangleCountToSeparate) {
-          return;
+      .slice(1);
+
+    for (let componentIndex = 0; componentIndex < looseComponents.length; componentIndex += 1) {
+      const component = looseComponents[componentIndex];
+
+      if (component.length < minLoosePartTriangleCountToSeparate) {
+        continue;
+      }
+
+      const nextObjectId = getNextObjectId();
+
+      for (let index = 0; index < component.length; index += 1) {
+        objectIds[component[index]] = nextObjectId;
+
+        if (index > 0 && index % separationProgressCheckInterval === 0) {
+          await onProgress(
+            `Separating loose part ${componentIndex + 1}/${looseComponents.length}: ${index}/${component.length}`,
+          );
         }
-
-        const nextObjectId = getNextObjectId();
-
-        component.forEach((triangleIndex) => {
-          objectIds[triangleIndex] = nextObjectId;
-        });
-      });
-  });
+      }
+    }
+  }
 }
 
 function buildLinkedFaceSelection(
@@ -1264,6 +2914,271 @@ function createLinkedFaceSelectionOverlay(selection: LinkedFaceSelectionDetails)
   return overlay;
 }
 
+function buildSelectionBoundaryLoops(selection: LinkedFaceSelectionDetails) {
+  const boundarySegments = new Map<
+    string,
+    {
+      endKey: string;
+      loopId: number;
+      selectedTriangleIndexes: Set<number>;
+      startKey: string;
+    }
+  >();
+  const segmentKeysByVertexKey = new Map<string, Set<string>>();
+
+  selection.selectedTriangleIndexes.forEach((triangleIndex) => {
+    selection.topology.triangles[triangleIndex]?.edgeKeys.forEach((edgeKey) => {
+      const adjacentTriangleIndexes = selection.topology.edgeToTriangles.get(edgeKey) ?? [];
+
+      if (adjacentTriangleIndexes.length !== 2) {
+        return;
+      }
+
+      const selectedAdjacentTriangleIndexes = adjacentTriangleIndexes.filter((edgeTriangleIndex) =>
+        selection.selectedTriangleIndexes.has(edgeTriangleIndex),
+      );
+
+      if (selectedAdjacentTriangleIndexes.length !== 1) {
+        return;
+      }
+
+      const [startKey, endKey] = edgeKey.split("|");
+
+      if (!startKey || !endKey) {
+        return;
+      }
+
+      let segment = boundarySegments.get(edgeKey);
+
+      if (!segment) {
+        segment = {
+          endKey,
+          loopId: -1,
+          selectedTriangleIndexes: new Set(),
+          startKey,
+        };
+        boundarySegments.set(edgeKey, segment);
+
+        [startKey, endKey].forEach((vertexKey) => {
+          const connectedSegmentKeys = segmentKeysByVertexKey.get(vertexKey);
+
+          if (connectedSegmentKeys) {
+            connectedSegmentKeys.add(edgeKey);
+          } else {
+            segmentKeysByVertexKey.set(vertexKey, new Set([edgeKey]));
+          }
+        });
+      }
+
+      segment.selectedTriangleIndexes.add(triangleIndex);
+    });
+  });
+
+  const loops: SelectionBoundaryLoop[] = [];
+  let nextLoopId = 0;
+
+  boundarySegments.forEach((seedSegment, seedSegmentKey) => {
+    if (seedSegment.loopId >= 0) {
+      return;
+    }
+
+    const loopId = nextLoopId;
+    const positions: number[] = [];
+    const segmentKeys: string[] = [];
+    const selectedTriangleIndexes = new Set<number>();
+    const pendingSegmentKeys = [seedSegmentKey];
+
+    nextLoopId += 1;
+
+    while (pendingSegmentKeys.length > 0) {
+      const segmentKey = pendingSegmentKeys.pop();
+
+      if (!segmentKey) {
+        continue;
+      }
+
+      const segment = boundarySegments.get(segmentKey);
+
+      if (!segment || segment.loopId >= 0) {
+        continue;
+      }
+
+      segment.loopId = loopId;
+      segmentKeys.push(segmentKey);
+      segment.selectedTriangleIndexes.forEach((triangleIndex) => {
+        selectedTriangleIndexes.add(triangleIndex);
+      });
+
+      const start = getPointFromVertexKey(segment.startKey);
+      const end = getPointFromVertexKey(segment.endKey);
+
+      positions.push(start.x, start.y, start.z, end.x, end.y, end.z);
+
+      [segment.startKey, segment.endKey].forEach((vertexKey) => {
+        segmentKeysByVertexKey.get(vertexKey)?.forEach((connectedSegmentKey) => {
+          const connectedSegment = boundarySegments.get(connectedSegmentKey);
+
+          if (connectedSegment && connectedSegment.loopId < 0) {
+            pendingSegmentKeys.push(connectedSegmentKey);
+          }
+        });
+      });
+    }
+
+    loops.push({
+      id: loopId,
+      positions: new Float32Array(positions),
+      segmentKeys,
+      selectedTriangleIndexes: Array.from(selectedTriangleIndexes),
+    });
+  });
+
+  return loops;
+}
+
+function createSelectionBoundaryLoopOverlay(
+  selection: LinkedFaceSelectionDetails,
+  loops: SelectionBoundaryLoop[],
+) {
+  const segmentPositions: number[] = [];
+
+  loops.forEach((loop) => {
+    for (let index = 0; index < loop.positions.length; index += 1) {
+      segmentPositions.push(loop.positions[index]);
+    }
+  });
+
+  if (segmentPositions.length === 0) {
+    return null;
+  }
+
+  const geometry = new LineSegmentsGeometry();
+
+  geometry.setPositions(segmentPositions);
+
+  const overlay = new LineSegments2(
+    geometry,
+    new LineMaterial({
+      color: looseEdgeColor,
+      depthTest: true,
+      depthWrite: false,
+      linewidth: looseEdgeLineWidth,
+    }),
+  );
+
+  overlay.name = "selection-boundary-loop-overlay";
+  overlay.position.copy(selection.mesh.position);
+  overlay.quaternion.copy(selection.mesh.quaternion);
+  overlay.scale.copy(selection.mesh.scale);
+  overlay.matrix.copy(selection.mesh.matrix);
+  overlay.matrixAutoUpdate = selection.mesh.matrixAutoUpdate;
+  overlay.renderOrder = looseEdgeHoverRenderOrder - 1;
+  overlay.userData.isSelectionBoundaryLoopOverlay = true;
+
+  return overlay;
+}
+
+function getBoundaryLoopRegionTriangleIndexes(
+  selection: LinkedFaceSelectionDetails,
+  loop: SelectionBoundaryLoop,
+) {
+  const selectedTriangleIndexes = selection.selectedTriangleIndexes;
+  const regionTriangleIndexes = new Set<number>();
+  const queue = loop.selectedTriangleIndexes.filter((triangleIndex) =>
+    selectedTriangleIndexes.has(triangleIndex),
+  );
+
+  for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+    const triangleIndex = queue[queueIndex];
+
+    if (regionTriangleIndexes.has(triangleIndex)) {
+      continue;
+    }
+
+    regionTriangleIndexes.add(triangleIndex);
+
+    selection.topology.triangles[triangleIndex]?.edgeKeys.forEach((edgeKey) => {
+      selection.topology.edgeToTriangles.get(edgeKey)?.forEach((edgeTriangleIndex) => {
+        if (
+          edgeTriangleIndex === triangleIndex ||
+          !selectedTriangleIndexes.has(edgeTriangleIndex) ||
+          regionTriangleIndexes.has(edgeTriangleIndex)
+        ) {
+          return;
+        }
+
+        queue.push(edgeTriangleIndex);
+      });
+    });
+  }
+
+  return regionTriangleIndexes;
+}
+
+function cutSelectionBoundaryLoopTopology(
+  selection: LinkedFaceSelectionDetails,
+  loop: SelectionBoundaryLoop,
+) {
+  const position = selection.mesh.geometry.getAttribute("position");
+  const regionTriangleIndexes = getBoundaryLoopRegionTriangleIndexes(selection, loop);
+
+  if (!(position instanceof THREE.BufferAttribute) || regionTriangleIndexes.size === 0) {
+    return false;
+  }
+
+  const cutVertexKeys = new Set<string>();
+
+  loop.segmentKeys.forEach((segmentKey) => {
+    segmentKey.split("|").forEach((vertexKey) => {
+      if (vertexKey) {
+        cutVertexKeys.add(vertexKey);
+      }
+    });
+  });
+
+  if (cutVertexKeys.size === 0) {
+    return false;
+  }
+
+  const topologyIds = ensureVertexTopologyIds(position);
+  const replacementTopologyIds = new Map<string, number>();
+  let nextTopologyId = getNextVertexTopologyId(position);
+  let changed = false;
+
+  cutVertexKeys.forEach((vertexKey) => {
+    replacementTopologyIds.set(vertexKey, nextTopologyId);
+    nextTopologyId += 1;
+  });
+
+  regionTriangleIndexes.forEach((triangleIndex) => {
+    const startIndex = triangleIndex * 3;
+    const vertices = getTriangleVertices(position, startIndex);
+
+    if (!vertices) {
+      return;
+    }
+
+    vertices.forEach((vertex, offset) => {
+      const replacementTopologyId = replacementTopologyIds.get(vertex.key);
+
+      if (replacementTopologyId == null) {
+        return;
+      }
+
+      const vertexIndex = startIndex + offset;
+
+      if (topologyIds[vertexIndex] === replacementTopologyId) {
+        return;
+      }
+
+      topologyIds[vertexIndex] = replacementTopologyId;
+      changed = true;
+    });
+  });
+
+  return changed;
+}
+
 function applyObjectColors(model: THREE.Object3D, hiddenObjectIds = new Set<number>()) {
   model.updateMatrixWorld(true);
 
@@ -1271,6 +3186,10 @@ function applyObjectColors(model: THREE.Object3D, hiddenObjectIds = new Set<numb
     if (
       !isMesh(child) ||
       child.userData.isWireframeOverlay === true ||
+      child.userData.isLooseEdgeFillOverlay === true ||
+      child.userData.isCapOffsetGizmoOverlay === true ||
+      child.userData.isSelectedObjectStencilOverlay === true ||
+      child.userData.isSelectedObjectOutlineOverlay === true ||
       child.userData.isHoverEdgeOverlay === true
     ) {
       return;
@@ -1299,7 +3218,8 @@ function applyObjectColors(model: THREE.Object3D, hiddenObjectIds = new Set<numb
 }
 
 function getPointFromVertexKey(vertexKey: string) {
-  const coordinates = vertexKey.split(",").map((value) => Number(value) / 100000);
+  const positionKey = vertexKey.split("#")[0] ?? vertexKey;
+  const coordinates = positionKey.split(",").map((value) => Number(value) / 100000);
 
   return new THREE.Vector3(coordinates[0] ?? 0, coordinates[1] ?? 0, coordinates[2] ?? 0);
 }
@@ -1346,6 +3266,13 @@ function isSelectableMesh(object: THREE.Object3D): object is THREE.Mesh {
   return (
     isMesh(object) &&
     object.userData.isWireframeOverlay !== true &&
+    object.userData.isLooseEdgeOverlay !== true &&
+    object.userData.isLooseEdgeFillOverlay !== true &&
+    object.userData.isCapOffsetGizmoOverlay !== true &&
+    object.userData.isLooseEdgeSelectionOverlay !== true &&
+    object.userData.isSelectedObjectStencilOverlay !== true &&
+    object.userData.isSelectedObjectOutlineOverlay !== true &&
+    object.userData.isSelectionBoundaryLoopOverlay !== true &&
     object.userData.isHoverEdgeOverlay !== true
   );
 }
@@ -1358,14 +3285,41 @@ export default function Home() {
   const linkedFaceSelectionRef = useRef<LinkedFaceSelectionDetails | null>(null);
   const linkedFaceSelectionCacheRef = useRef<LinkedFaceSelectionCache | null>(null);
   const linkedFaceSelectionOverlayRef = useRef<LineSegments2 | null>(null);
+  const selectionBoundaryLoopsRef = useRef<SelectionBoundaryLoop[]>([]);
+  const selectionBoundaryLoopOverlayRef = useRef<LineSegments2 | null>(null);
   const linkedFaceSelectionThresholdRef = useRef(defaultLinkedFaceSelectionAngle);
+  const looseEdgeLoopCapStatesRef = useRef<Map<string, LooseEdgeLoopCapState>>(new Map());
+  const capOffsetDragRef = useRef<CapOffsetDragState | null>(null);
+  const capOffsetGizmoHandleRef = useRef<THREE.Object3D | null>(null);
+  const capOffsetGizmoRef = useRef<THREE.Group | null>(null);
+  const capNormalTargetRef = useRef<THREE.Object3D | null>(null);
+  const capNormalTransformControlsRef = useRef<TransformControls | null>(null);
+  const capNormalTransformHelperRef = useRef<THREE.Object3D | null>(null);
+  const rememberedTriangleSelectionRef = useRef<RememberedTriangleSelection | null>(null);
+  const selectedLooseEdgeLoopRef = useRef<HoveredEdge | null>(null);
+  const selectedLooseEdgeLoopOverlayRef = useRef<LineSegments2 | null>(null);
   const nextSeparatedObjectIdRef = useRef(1);
   const hiddenObjectIdsRef = useRef<Set<number>>(new Set());
   const objectNamesRef = useRef<ObjectNameMap>({});
+  const separationBusyRef = useRef(false);
+  const separateModeActiveRef = useRef(false);
   const selectedObjectIdRef = useRef<number | null>(null);
   const clearLinkedFaceSelectionHandlerRef = useRef<(() => void) | null>(null);
+  const clearSelectedLooseEdgeLoopHandlerRef = useRef<(() => void) | null>(null);
   const hideSelectedObjectHandlerRef = useRef<(() => void) | null>(null);
+  const selectLooseEdgeLoopHandlerRef = useRef<((edge: HoveredEdge) => void) | null>(null);
+  const selectSeparatedObjectHandlerRef = useRef<((objectId: number) => void) | null>(null);
+  const separateByBoundaryLoopHandlerRef = useRef<((loopId: number) => void) | null>(null);
+  const setLooseEdgeLoopCapOffsetHandlerRef = useRef<
+    ((edge: HoveredEdge, offset: number) => void) | null
+  >(null);
+  const setLooseEdgeLoopCapTargetHandlerRef = useRef<
+    ((edge: HoveredEdge, target: THREE.Vector3) => void) | null
+  >(null);
   const showAllObjectsHandlerRef = useRef<(() => void) | null>(null);
+  const syncLooseEdgeLoopCapStatesHandlerRef = useRef<
+    ((modelRoot?: THREE.Object3D | null) => void) | null
+  >(null);
   const selectLinkedFaceHandlerRef = useRef<
     ((mesh: THREE.Mesh, triangleIndex: number) => void) | null
   >(null);
@@ -1381,8 +3335,23 @@ export default function Home() {
   });
   const [linkedFaceSelectionGraph, setLinkedFaceSelectionGraph] =
     useState<LinkedFaceSelectionGraph | null>(null);
+  const [looseEdgeLoopMode, setLooseEdgeLoopMode] = useState<LooseEdgeLoopMode>("none");
+  const [separateModeActive, setSeparateModeActive] = useState(false);
+  const [separationBusy, setSeparationBusy] = useState(false);
+  const [separationProgress, setSeparationProgress] = useState<string | null>(null);
   const [separatedObjects, setSeparatedObjects] = useState<SeparatedObjectSummary[]>([]);
   const [selectedObjectId, setSelectedObjectId] = useState<number | null>(null);
+  const [selectedLooseEdgeLoopActive, setSelectedLooseEdgeLoopActive] = useState(false);
+
+  const setSeparateModeActiveState = (active: boolean) => {
+    separateModeActiveRef.current = active;
+    setSeparateModeActive(active);
+  };
+
+  const setSeparationBusyState = (busy: boolean) => {
+    separationBusyRef.current = busy;
+    setSeparationBusy(busy);
+  };
 
   const clearLinkedFaceSelectionOverlay = () => {
     const overlay = linkedFaceSelectionOverlayRef.current;
@@ -1396,6 +3365,585 @@ export default function Home() {
     linkedFaceSelectionOverlayRef.current = null;
   };
 
+  const clearSelectionBoundaryLoopOverlay = () => {
+    const overlay = selectionBoundaryLoopOverlayRef.current;
+
+    selectionBoundaryLoopsRef.current = [];
+
+    if (!overlay) {
+      return;
+    }
+
+    overlay.parent?.remove(overlay);
+    disposeObject(overlay);
+    selectionBoundaryLoopOverlayRef.current = null;
+  };
+
+  const removeLooseEdgeLoopCapFill = (state: LooseEdgeLoopCapState) => {
+    disposeLooseEdgeLoopFillOcclusionOverlay(state);
+
+    if (!state.fill) {
+      return;
+    }
+
+    state.fill.parent?.remove(state.fill);
+    disposeObject(state.fill);
+    state.fill = null;
+  };
+
+  const removeCapOffsetGizmo = () => {
+    capOffsetDragRef.current = null;
+    const controls = controlsRef.current;
+    const transformControls = capNormalTransformControlsRef.current;
+    const transformHelper = capNormalTransformHelperRef.current;
+    const transformTarget = capNormalTargetRef.current;
+
+    if (controls) {
+      controls.enabled = true;
+    }
+
+    transformControls?.detach();
+
+    if (transformHelper) {
+      transformHelper.visible = false;
+    }
+
+    if (transformTarget) {
+      transformTarget.visible = false;
+    }
+
+    const gizmo = capOffsetGizmoRef.current;
+
+    if (!gizmo) {
+      return;
+    }
+
+    gizmo.parent?.remove(gizmo);
+    disposeObject(gizmo);
+    capOffsetGizmoRef.current = null;
+    capOffsetGizmoHandleRef.current = null;
+  };
+
+  const clearLooseEdgeLoopCapStates = () => {
+    removeCapOffsetGizmo();
+    looseEdgeLoopCapStatesRef.current.forEach((state) => {
+      removeLooseEdgeLoopCapFill(state);
+    });
+    looseEdgeLoopCapStatesRef.current.clear();
+  };
+
+  const refreshLooseEdgeLoopCapVisibility = (hiddenObjectIds = hiddenObjectIdsRef.current) => {
+    const overlayActive =
+      selectedObjectIdRef.current != null || selectedLooseEdgeLoopRef.current != null;
+
+    looseEdgeLoopCapStatesRef.current.forEach((state) => {
+      if (!state.fill) {
+        return;
+      }
+
+      if (!state.fill.parent) {
+        disposeLooseEdgeLoopFillOcclusionOverlay(state);
+        state.fill = null;
+        return;
+      }
+
+      state.fill.visible = !hiddenObjectIds.has(state.objectId);
+      setLooseEdgeLoopFillBaseMaterial(state.fill, overlayActive);
+
+      if (!overlayActive || !state.fill.visible) {
+        if (state.occlusionOverlay) {
+          state.occlusionOverlay.visible = false;
+        }
+        return;
+      }
+
+      if (!state.occlusionOverlay) {
+        state.occlusionOverlay = createLooseEdgeLoopFillOcclusionOverlay(state.fill);
+      }
+
+      if (state.occlusionOverlay.parent !== state.fill.parent) {
+        state.occlusionOverlay.parent?.remove(state.occlusionOverlay);
+        state.fill.parent.add(state.occlusionOverlay);
+      }
+
+      state.occlusionOverlay.position.copy(state.fill.position);
+      state.occlusionOverlay.quaternion.copy(state.fill.quaternion);
+      state.occlusionOverlay.scale.copy(state.fill.scale);
+      state.occlusionOverlay.matrix.copy(state.fill.matrix);
+      state.occlusionOverlay.matrixAutoUpdate = state.fill.matrixAutoUpdate;
+      state.occlusionOverlay.visible = true;
+    });
+  };
+
+  const refreshCapOffsetGizmo = (edge = selectedLooseEdgeLoopRef.current) => {
+    const modelRoot = rootRef.current;
+
+    if (!edge || !modelRoot || !isSameLooseEdgeLoop(edge, selectedLooseEdgeLoopRef.current)) {
+      removeCapOffsetGizmo();
+      return;
+    }
+
+    const key = getLooseEdgeLoopFillKey(edge);
+    const state = looseEdgeLoopCapStatesRef.current.get(key);
+    const axisData = state
+      ? getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget)
+      : null;
+    const parent = edge.mesh.parent ?? modelRoot;
+
+    if (
+      !state ||
+      !state.fill ||
+      !axisData ||
+      hiddenObjectIdsRef.current.has(edge.objectId) ||
+      state.mode === "none" ||
+      state.mode === "fill"
+    ) {
+      removeCapOffsetGizmo();
+      return;
+    }
+
+    if (isNormalTargetLoopMode(state.mode)) {
+      const gizmo = capOffsetGizmoRef.current;
+
+      if (gizmo) {
+        gizmo.parent?.remove(gizmo);
+        disposeObject(gizmo);
+        capOffsetGizmoRef.current = null;
+        capOffsetGizmoHandleRef.current = null;
+      }
+
+      const transformControls = capNormalTransformControlsRef.current;
+      const transformHelper = capNormalTransformHelperRef.current;
+      const transformTarget = capNormalTargetRef.current;
+
+      if (!transformControls || !transformHelper || !transformTarget) {
+        return;
+      }
+
+      edge.mesh.updateMatrixWorld(true);
+      transformTarget.position.copy(
+        edge.mesh.localToWorld(
+          axisData.data.center.clone().addScaledVector(axisData.axis, state.offset),
+        ),
+      );
+      transformTarget.visible = true;
+      transformControls.setMode("translate");
+      transformControls.setSpace("world");
+      transformControls.setSize(0.7);
+      transformControls.showX = true;
+      transformControls.showY = true;
+      transformControls.showZ = true;
+      transformControls.showXY = false;
+      transformControls.showYZ = false;
+      transformControls.showXZ = false;
+      transformControls.attach(transformTarget);
+      transformControls.enabled = true;
+      transformHelper.visible = true;
+
+      return;
+    }
+
+    capNormalTransformControlsRef.current?.detach();
+
+    if (capNormalTransformHelperRef.current) {
+      capNormalTransformHelperRef.current.visible = false;
+    }
+
+    if (capNormalTargetRef.current) {
+      capNormalTargetRef.current.visible = false;
+    }
+
+    let gizmo = capOffsetGizmoRef.current;
+    let handle = capOffsetGizmoHandleRef.current;
+    let arrow = gizmo?.userData.arrowHelper as THREE.ArrowHelper | undefined;
+
+    if (!gizmo || !handle || !arrow) {
+      gizmo = new THREE.Group();
+      gizmo.name = "cap-offset-gizmo-overlay";
+      gizmo.renderOrder = looseEdgeHoverRenderOrder + 1;
+      gizmo.userData.isCapOffsetGizmoOverlay = true;
+      gizmo.userData.fillKey = key;
+
+      arrow = new THREE.ArrowHelper(
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Vector3(),
+        1,
+        capOffsetGizmoColor,
+      );
+      arrow.name = "cap-offset-arrow-overlay";
+      arrow.userData.isCapOffsetGizmoOverlay = true;
+      arrow.userData.fillKey = key;
+      arrow.traverse((child) => {
+        child.renderOrder = looseEdgeHoverRenderOrder + 1;
+        child.userData.isCapOffsetGizmoOverlay = true;
+        child.userData.fillKey = key;
+
+        if (!isDisposableDrawObject(child)) {
+          return;
+        }
+
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+
+        materials.forEach((material) => {
+          material.depthTest = false;
+          material.depthWrite = false;
+          material.opacity = 0.96;
+          material.transparent = true;
+        });
+      });
+
+      gizmo.userData.arrowHelper = arrow;
+      gizmo.add(arrow);
+      handle = arrow;
+
+      capOffsetGizmoRef.current = gizmo;
+      capOffsetGizmoHandleRef.current = handle;
+    }
+
+    if (gizmo.parent !== parent) {
+      gizmo.parent?.remove(gizmo);
+      parent.add(gizmo);
+    }
+
+    gizmo.position.copy(edge.mesh.position);
+    gizmo.quaternion.copy(edge.mesh.quaternion);
+    gizmo.scale.copy(edge.mesh.scale);
+    gizmo.matrix.copy(edge.mesh.matrix);
+    gizmo.matrixAutoUpdate = edge.mesh.matrixAutoUpdate;
+    gizmo.visible = true;
+    gizmo.userData.fillKey = key;
+    handle.userData.fillKey = key;
+    gizmo.traverse((child) => {
+      child.userData.isCapOffsetGizmoOverlay = true;
+      child.userData.fillKey = key;
+    });
+
+    const targetOffset = axisData.axis.clone().multiplyScalar(state.offset);
+    const arrowDirection =
+      targetOffset.lengthSq() > 0 ? targetOffset.clone().normalize() : axisData.axis.clone();
+    const loopSize = new THREE.Box3()
+      .setFromPoints(axisData.data.points)
+      .getSize(new THREE.Vector3());
+    const loopSpan = Math.max(loopSize.x, loopSize.y, loopSize.z);
+    const visualLength = Math.max(targetOffset.length(), loopSpan * 0.12, capOffsetGizmoMinLength);
+    const headLength = Math.min(
+      visualLength * 0.35,
+      Math.max(loopSpan * capOffsetGizmoHeadScale, 0.025),
+    );
+    const headWidth = headLength * 0.6;
+
+    arrow.position.copy(axisData.data.center);
+    arrow.setDirection(arrowDirection);
+    arrow.setLength(visualLength, headLength, headWidth);
+    arrow.setColor(capOffsetGizmoColor);
+  };
+
+  const rebuildLooseEdgeLoopCapFill = (
+    edge: HoveredEdge,
+    key: string,
+    state: LooseEdgeLoopCapState,
+  ) => {
+    const axisData = getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget);
+
+    if (!axisData) {
+      return;
+    }
+
+    if (state.fill) {
+      removeLooseEdgeLoopCapFill(state);
+    }
+
+    state.offset = clampLooseEdgeLoopCapOffset(edge, state.mode, state.offset, state.normalTarget);
+
+    if (isNormalTargetLoopMode(state.mode)) {
+      state.normalTarget = axisData.data.center
+        .clone()
+        .addScaledVector(axisData.axis, state.offset);
+    }
+
+    const fill = createLooseEdgeLoopFill(edge, state.mode, state.offset, state.normalTarget);
+    const parent = edge.mesh.parent ?? rootRef.current;
+
+    if (!fill || !parent) {
+      if (fill) {
+        disposeObject(fill);
+      }
+      looseEdgeLoopCapStatesRef.current.set(key, state);
+      return;
+    }
+
+    parent.add(fill);
+    fill.visible = !hiddenObjectIdsRef.current.has(edge.objectId);
+    state.fill = fill;
+    looseEdgeLoopCapStatesRef.current.set(key, state);
+    refreshLooseEdgeLoopCapVisibility();
+  };
+
+  const setLooseEdgeLoopCapTarget = (edge: HoveredEdge, target: THREE.Vector3) => {
+    const key = getLooseEdgeLoopFillKey(edge);
+    const state = looseEdgeLoopCapStatesRef.current.get(key);
+
+    if (!state || !isNormalTargetLoopMode(state.mode)) {
+      refreshCapOffsetGizmo(edge);
+      return;
+    }
+
+    const axisData = getLooseEdgeLoopCapAxisData(edge, state.mode, target);
+
+    if (!axisData) {
+      return;
+    }
+
+    const requestedOffset = target.distanceTo(axisData.data.center);
+    const nextOffset = clampLooseEdgeLoopCapOffset(edge, state.mode, requestedOffset, target);
+    const nextTarget = axisData.data.center.clone().addScaledVector(axisData.axis, nextOffset);
+
+    if (
+      Math.abs(nextOffset - state.offset) < 0.0001 &&
+      state.normalTarget &&
+      nextTarget.distanceToSquared(state.normalTarget) < 0.000001
+    ) {
+      return;
+    }
+
+    state.offset = nextOffset;
+    state.normalTarget = nextTarget;
+    rebuildLooseEdgeLoopCapFill(edge, key, state);
+    refreshCapOffsetGizmo(edge);
+  };
+
+  const syncLooseEdgeLoopCapStates = (modelRoot: THREE.Object3D | null = rootRef.current) => {
+    if (!modelRoot) {
+      return;
+    }
+
+    const currentKeys = new Set<string>();
+
+    modelRoot.traverse((child) => {
+      if (!isSelectableMesh(child)) {
+        return;
+      }
+
+      const loopsById = child.userData.looseEdgeLoopById;
+
+      if (!(loopsById instanceof Map)) {
+        return;
+      }
+
+      loopsById.forEach((loop) => {
+        const typedLoop = loop as LooseEdgeLoop;
+
+        currentKeys.add(getLooseEdgeLoopCacheKey(child, typedLoop));
+      });
+    });
+
+    looseEdgeLoopCapStatesRef.current.forEach((state, key) => {
+      if (currentKeys.has(key)) {
+        return;
+      }
+
+      removeLooseEdgeLoopCapFill(state);
+      looseEdgeLoopCapStatesRef.current.delete(key);
+    });
+
+    refreshLooseEdgeLoopCapVisibility();
+    refreshCapOffsetGizmo();
+  };
+
+  const getLooseEdgeLoopCapMode = (edge: HoveredEdge) => {
+    const key = getLooseEdgeLoopFillKey(edge);
+
+    return looseEdgeLoopCapStatesRef.current.get(key)?.mode ?? "none";
+  };
+
+  const setLooseEdgeLoopCapMode = (edge: HoveredEdge, mode: LooseEdgeLoopMode) => {
+    const key = getLooseEdgeLoopFillKey(edge);
+    const existingState = looseEdgeLoopCapStatesRef.current.get(key);
+    const existingMode = existingState?.mode;
+    const axisData =
+      mode === "none"
+        ? null
+        : getLooseEdgeLoopCapAxisData(edge, mode, existingState?.normalTarget ?? null);
+
+    if (mode === "none") {
+      if (existingState) {
+        removeLooseEdgeLoopCapFill(existingState);
+        looseEdgeLoopCapStatesRef.current.delete(key);
+      }
+      refreshCapOffsetGizmo(edge);
+      return;
+    }
+
+    if (!axisData) {
+      refreshCapOffsetGizmo(edge);
+      return;
+    }
+
+    const existingOffset = existingState?.offset;
+    const state: LooseEdgeLoopCapState = existingState ?? {
+      fill: null,
+      mode,
+      normalTarget: null,
+      occlusionOverlay: null,
+      objectId: edge.objectId,
+      offset: axisData.defaultOffset,
+      sourceMeshUuid: edge.mesh.uuid,
+    };
+
+    state.mode = mode;
+    state.objectId = edge.objectId;
+    state.sourceMeshUuid = edge.mesh.uuid;
+
+    if (mode === "fill") {
+      state.offset = axisData.defaultOffset;
+    } else if (existingMode !== mode || !Number.isFinite(state.offset)) {
+      state.offset = axisData.defaultOffset;
+    }
+
+    state.normalTarget = isNormalTargetLoopMode(mode)
+      ? existingMode === mode && state.normalTarget
+        ? state.normalTarget
+        : axisData.data.center.clone().addScaledVector(axisData.axis, state.offset)
+      : null;
+
+    const existingFill = state.fill;
+    const canReuseExistingFill =
+      existingFill !== null &&
+      existingMode === mode &&
+      (mode !== "fill" ||
+        Math.abs((existingOffset ?? axisData.defaultOffset) - axisData.defaultOffset) < 0.0001);
+
+    if (canReuseExistingFill) {
+      existingFill.visible = !hiddenObjectIdsRef.current.has(edge.objectId);
+      looseEdgeLoopCapStatesRef.current.set(key, state);
+      refreshCapOffsetGizmo(edge);
+      return;
+    }
+
+    rebuildLooseEdgeLoopCapFill(edge, key, state);
+    refreshCapOffsetGizmo(edge);
+  };
+
+  const setLooseEdgeLoopCapOffset = (edge: HoveredEdge, offset: number) => {
+    const key = getLooseEdgeLoopFillKey(edge);
+    const state = looseEdgeLoopCapStatesRef.current.get(key);
+
+    if (!state || state.mode === "none") {
+      refreshCapOffsetGizmo(edge);
+      return;
+    }
+
+    const nextOffset = clampLooseEdgeLoopCapOffset(edge, state.mode, offset, state.normalTarget);
+
+    if (Math.abs(nextOffset - state.offset) < 0.0001) {
+      return;
+    }
+
+    state.offset = nextOffset;
+
+    if (isNormalTargetLoopMode(state.mode)) {
+      const axisData = getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget);
+
+      if (axisData) {
+        state.normalTarget = axisData.data.center
+          .clone()
+          .addScaledVector(axisData.axis, nextOffset);
+      }
+    }
+
+    rebuildLooseEdgeLoopCapFill(edge, key, state);
+    refreshCapOffsetGizmo(edge);
+  };
+
+  const clearSelectedLooseEdgeLoop = () => {
+    const currentLoop = selectedLooseEdgeLoopRef.current;
+    const overlay = selectedLooseEdgeLoopOverlayRef.current;
+
+    if (currentLoop) {
+      setLooseEdgeLoopColor(currentLoop.mesh, currentLoop.loopId, looseEdgeColor);
+    }
+
+    if (overlay) {
+      overlay.parent?.remove(overlay);
+      disposeObject(overlay);
+      selectedLooseEdgeLoopOverlayRef.current = null;
+    }
+
+    removeCapOffsetGizmo();
+    selectedLooseEdgeLoopRef.current = null;
+    setSelectedLooseEdgeLoopActive(false);
+    refreshLooseEdgeLoopCapVisibility();
+  };
+
+  const selectLooseEdgeLoop = (edge: HoveredEdge) => {
+    const modelRoot = rootRef.current;
+
+    clearSelectedLooseEdgeLoop();
+    clearLinkedFaceSelection(true, true);
+    clearHoverEdgeOverlay(edge);
+    selectedLooseEdgeLoopRef.current = edge;
+    setLooseEdgeLoopMode(getLooseEdgeLoopCapMode(edge));
+    setSelectedLooseEdgeLoopActive(true);
+    refreshLooseEdgeLoopCapVisibility();
+
+    const overlay = createLooseEdgeLoopOverlay(edge, selectedLooseEdgeLoopColor);
+
+    if (!overlay) {
+      return;
+    }
+
+    (edge.mesh.parent ?? modelRoot)?.add(overlay);
+    selectedLooseEdgeLoopOverlayRef.current = overlay;
+    refreshCapOffsetGizmo(edge);
+  };
+
+  const handleLooseEdgeLoopModeChange = (mode: LooseEdgeLoopMode) => {
+    const edge = selectedLooseEdgeLoopRef.current;
+
+    setLooseEdgeLoopMode(mode);
+
+    if (edge) {
+      setLooseEdgeLoopCapMode(edge, mode);
+    }
+  };
+
+  const rememberTriangleSelection = (mesh: THREE.Mesh, triangleIndex: number) => {
+    rememberedTriangleSelectionRef.current = {
+      mesh,
+      objectId: getTriangleObjectId(mesh, triangleIndex),
+      triangleIndex,
+    };
+  };
+
+  const getRememberedSelectedTriangle = () => {
+    const rememberedTriangle = rememberedTriangleSelectionRef.current;
+    const selectedObjectId = selectedObjectIdRef.current;
+
+    if (
+      !rememberedTriangle ||
+      selectedObjectId == null ||
+      rememberedTriangle.objectId !== selectedObjectId ||
+      hiddenObjectIdsRef.current.has(selectedObjectId) ||
+      !isSelectableMesh(rememberedTriangle.mesh)
+    ) {
+      return null;
+    }
+
+    const position = rememberedTriangle.mesh.geometry.getAttribute("position");
+
+    if (
+      !(position instanceof THREE.BufferAttribute) ||
+      rememberedTriangle.triangleIndex < 0 ||
+      rememberedTriangle.triangleIndex >= Math.floor(position.count / 3) ||
+      getTriangleObjectId(rememberedTriangle.mesh, rememberedTriangle.triangleIndex) !==
+        selectedObjectId
+    ) {
+      return null;
+    }
+
+    return rememberedTriangle;
+  };
+
   const applyLinkedFaceSelectionVisuals = (selection: LinkedFaceSelectionDetails | null) => {
     const modelRoot = rootRef.current;
 
@@ -1405,16 +3953,29 @@ export default function Home() {
 
     applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
     applyLinkedFaceSelectionColors(selection);
+    refreshSelectedObjectOutlines(modelRoot, hiddenObjectIdsRef.current, selection.objectId);
     clearLinkedFaceSelectionOverlay();
+    clearSelectionBoundaryLoopOverlay();
 
     const overlay = createLinkedFaceSelectionOverlay(selection);
 
-    if (!overlay) {
-      return;
+    if (overlay) {
+      modelRoot.add(overlay);
+      linkedFaceSelectionOverlayRef.current = overlay;
     }
 
-    modelRoot.add(overlay);
-    linkedFaceSelectionOverlayRef.current = overlay;
+    if (separateModeActiveRef.current) {
+      const boundaryLoops = buildSelectionBoundaryLoops(selection);
+      const boundaryOverlay = createSelectionBoundaryLoopOverlay(selection, boundaryLoops);
+
+      selectionBoundaryLoopsRef.current = boundaryLoops;
+
+      if (boundaryOverlay) {
+        (selection.mesh.parent ?? modelRoot).add(boundaryOverlay);
+        selectionBoundaryLoopOverlayRef.current = boundaryOverlay;
+      }
+    }
+
     updateHoverEdgeResolution(
       modelRoot,
       mountRef.current?.clientWidth ?? 1,
@@ -1422,12 +3983,14 @@ export default function Home() {
     );
   };
 
-  const clearLinkedFaceSelection = (clearObjectSelection = true) => {
+  const clearLinkedFaceSelection = (clearObjectSelection = true, refreshVisuals = true) => {
     const modelRoot = rootRef.current;
+    const hadLinkedFaceSelection = linkedFaceSelectionRef.current != null;
 
     linkedFaceSelectionRef.current = null;
     linkedFaceSelectionCacheRef.current = null;
     clearLinkedFaceSelectionOverlay();
+    clearSelectionBoundaryLoopOverlay();
     setLinkedFaceSelectionGraph(null);
     setLinkedFaceSelection((current) => ({
       ...current,
@@ -1436,12 +3999,57 @@ export default function Home() {
     }));
 
     if (clearObjectSelection) {
+      rememberedTriangleSelectionRef.current = null;
       selectedObjectIdRef.current = null;
       setSelectedObjectId(null);
+      setSeparateModeActiveState(false);
+      setSeparationProgress(null);
+      refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
     }
 
-    if (modelRoot) {
-      applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
+    if (modelRoot && refreshVisuals) {
+      if (hadLinkedFaceSelection) {
+        applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
+      }
+
+      refreshSelectedObjectOutlines(
+        modelRoot,
+        hiddenObjectIdsRef.current,
+        selectedObjectIdRef.current,
+      );
+      refreshLooseEdgeOverlays(
+        modelRoot,
+        hiddenObjectIdsRef.current,
+        selectedObjectIdRef.current,
+        false,
+      );
+    }
+  };
+
+  const toggleSeparateMode = () => {
+    if (selectedObjectIdRef.current == null || separationBusyRef.current) {
+      return;
+    }
+
+    const nextSeparateModeActive = !separateModeActiveRef.current;
+
+    setSeparateModeActiveState(nextSeparateModeActive);
+    setSeparationProgress(null);
+
+    if (!nextSeparateModeActive) {
+      clearLinkedFaceSelection(false);
+      return;
+    }
+
+    if (linkedFaceSelectionRef.current) {
+      applyLinkedFaceSelectionVisuals(linkedFaceSelectionRef.current);
+      return;
+    }
+
+    const rememberedTriangle = getRememberedSelectedTriangle();
+
+    if (rememberedTriangle) {
+      void selectLinkedFace(rememberedTriangle.mesh, rememberedTriangle.triangleIndex);
     }
   };
 
@@ -1493,29 +4101,56 @@ export default function Home() {
     refreshLinkedFaceSelection(threshold);
   };
 
-  const selectLinkedFace = (mesh: THREE.Mesh, triangleIndex: number) => {
-    const cache = buildLinkedFaceSelectionCache(mesh, triangleIndex);
-
-    if (!cache) {
+  const selectLinkedFace = async (mesh: THREE.Mesh, triangleIndex: number) => {
+    if (separationBusyRef.current) {
       return;
     }
 
-    const selection = createLinkedFaceSelectionFromCache(
-      cache,
-      linkedFaceSelectionThresholdRef.current,
-    );
+    setSeparationBusyState(true);
+    setSeparationProgress("Calculating selection");
+    await waitForBrowserPaint();
 
-    linkedFaceSelectionRef.current = selection;
-    linkedFaceSelectionCacheRef.current = cache;
-    selectedObjectIdRef.current = selection.objectId;
-    setSelectedObjectId(selection.objectId);
-    setLinkedFaceSelectionGraph(cache);
-    setLinkedFaceSelection({
-      active: true,
-      count: selection.selectedTriangleIndexes.size,
-      threshold: linkedFaceSelectionThresholdRef.current,
-    });
-    applyLinkedFaceSelectionVisuals(selection);
+    try {
+      const cache = buildLinkedFaceSelectionCache(mesh, triangleIndex);
+
+      if (!cache) {
+        return;
+      }
+
+      clearSelectedLooseEdgeLoop();
+
+      const selection = createLinkedFaceSelectionFromCache(
+        cache,
+        linkedFaceSelectionThresholdRef.current,
+      );
+
+      linkedFaceSelectionRef.current = selection;
+      linkedFaceSelectionCacheRef.current = cache;
+      selectedObjectIdRef.current = selection.objectId;
+      setSelectedObjectId(selection.objectId);
+      refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
+      refreshLooseEdgeOverlays(
+        rootRef.current ?? selection.mesh,
+        hiddenObjectIdsRef.current,
+        selection.objectId,
+        false,
+      );
+      refreshSelectedObjectOutlines(
+        rootRef.current ?? selection.mesh,
+        hiddenObjectIdsRef.current,
+        selection.objectId,
+      );
+      setLinkedFaceSelectionGraph(cache);
+      setLinkedFaceSelection({
+        active: true,
+        count: selection.selectedTriangleIndexes.size,
+        threshold: linkedFaceSelectionThresholdRef.current,
+      });
+      applyLinkedFaceSelectionVisuals(selection);
+    } finally {
+      setSeparationBusyState(false);
+      setSeparationProgress(null);
+    }
   };
 
   const refreshSeparatedObjects = () => {
@@ -1532,8 +4167,21 @@ export default function Home() {
     const modelRoot = rootRef.current;
     const selection = linkedFaceSelectionRef.current;
     const currentSelectedObjectId = selectedObjectIdRef.current;
+    const selectedLooseEdgeLoop = selectedLooseEdgeLoopRef.current;
 
     hiddenObjectIdsRef.current = nextHiddenObjectIds;
+    refreshLooseEdgeLoopCapVisibility(nextHiddenObjectIds);
+
+    if (
+      rememberedTriangleSelectionRef.current &&
+      nextHiddenObjectIds.has(rememberedTriangleSelectionRef.current.objectId)
+    ) {
+      rememberedTriangleSelectionRef.current = null;
+    }
+
+    if (selectedLooseEdgeLoop && nextHiddenObjectIds.has(selectedLooseEdgeLoop.objectId)) {
+      clearSelectedLooseEdgeLoop();
+    }
 
     if (selection && nextHiddenObjectIds.has(selection.objectId)) {
       clearLinkedFaceSelection();
@@ -1544,13 +4192,20 @@ export default function Home() {
     }
 
     if (currentSelectedObjectId != null && nextHiddenObjectIds.has(currentSelectedObjectId)) {
+      rememberedTriangleSelectionRef.current = null;
       selectedObjectIdRef.current = null;
       setSelectedObjectId(null);
+      setSeparateModeActiveState(false);
+      setSeparationProgress(null);
     }
+
+    refreshLooseEdgeLoopCapVisibility(nextHiddenObjectIds);
 
     if (modelRoot) {
       refreshObjectMaterialGroups(modelRoot, nextHiddenObjectIds);
       refreshObjectWireframes(modelRoot, nextHiddenObjectIds);
+      refreshSelectedObjectOutlines(modelRoot, nextHiddenObjectIds, selectedObjectIdRef.current);
+      refreshLooseEdgeOverlays(modelRoot, nextHiddenObjectIds, selectedObjectIdRef.current, false);
       setSeparatedObjects(
         collectSeparatedObjects(modelRoot, nextHiddenObjectIds, objectNamesRef.current),
       );
@@ -1593,9 +4248,34 @@ export default function Home() {
   };
 
   const selectSeparatedObject = (objectId: number) => {
-    clearLinkedFaceSelection(false);
+    if (separationBusyRef.current) {
+      return;
+    }
+
+    const currentObjectId = selectedObjectIdRef.current;
+    const hasLinkedFaceSelection = linkedFaceSelectionRef.current != null;
+
+    if (currentObjectId === objectId && !hasLinkedFaceSelection) {
+      return;
+    }
+
+    clearSelectedLooseEdgeLoop();
+    clearLinkedFaceSelection(false, false);
+    setSeparationProgress(null);
     selectedObjectIdRef.current = objectId;
     setSelectedObjectId(objectId);
+    refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
+
+    const modelRoot = rootRef.current;
+
+    if (modelRoot) {
+      if (hasLinkedFaceSelection) {
+        applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
+      }
+
+      refreshSelectedObjectOutlines(modelRoot, hiddenObjectIdsRef.current, objectId);
+      refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, objectId, false);
+    }
   };
 
   const renameSeparatedObject = (objectId: number, name: string) => {
@@ -1612,7 +4292,11 @@ export default function Home() {
     refreshSeparatedObjects();
   };
 
-  const handleSeparateSelection = () => {
+  const handleSeparateSelection = async () => {
+    if (separationBusyRef.current) {
+      return;
+    }
+
     const selection = linkedFaceSelectionRef.current;
     const modelRoot = rootRef.current;
 
@@ -1626,45 +4310,181 @@ export default function Home() {
       return;
     }
 
-    const nextObjectId = nextSeparatedObjectIdRef.current;
+    setSeparationBusyState(true);
+    const reportProgress = createThrottledProgressReporter(setSeparationProgress);
 
-    nextSeparatedObjectIdRef.current += 1;
-    selection.selectedTriangleIndexes.forEach((triangleIndex) => {
-      objectIds[triangleIndex] = nextObjectId;
-    });
-    separateLooseObjectParts(
-      selection.topology,
-      objectIds,
-      [selection.objectId, nextObjectId],
-      () => {
-        const loosePartObjectId = nextSeparatedObjectIdRef.current;
+    await reportProgress("Preparing separation", true);
 
-        nextSeparatedObjectIdRef.current += 1;
+    try {
+      clearSelectedLooseEdgeLoop();
 
-        return loosePartObjectId;
-      },
-    );
+      const nextObjectId = nextSeparatedObjectIdRef.current;
+      const selectedTriangleIndexes = Array.from(selection.selectedTriangleIndexes);
 
-    linkedFaceSelectionRef.current = null;
-    linkedFaceSelectionCacheRef.current = null;
-    clearLinkedFaceSelectionOverlay();
-    setLinkedFaceSelectionGraph(null);
-    setLinkedFaceSelection((current) => ({
-      ...current,
-      active: false,
-      count: 0,
-    }));
-    refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
-    applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
-    refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current);
-    refreshSeparatedObjects();
+      if (selectedTriangleIndexes.length === 0) {
+        return;
+      }
+
+      nextSeparatedObjectIdRef.current += 1;
+
+      for (let index = 0; index < selectedTriangleIndexes.length; index += 1) {
+        objectIds[selectedTriangleIndexes[index]] = nextObjectId;
+
+        if (index > 0 && index % separationProgressCheckInterval === 0) {
+          await reportProgress(`Assigning faces: ${index}/${selectedTriangleIndexes.length}`);
+        }
+      }
+
+      await separateLooseObjectPartsAsync(
+        selection.topology,
+        objectIds,
+        [selection.objectId, nextObjectId],
+        () => {
+          const loosePartObjectId = nextSeparatedObjectIdRef.current;
+
+          nextSeparatedObjectIdRef.current += 1;
+
+          return loosePartObjectId;
+        },
+        reportProgress,
+      );
+
+      await reportProgress("Refreshing model");
+
+      rememberedTriangleSelectionRef.current = null;
+      linkedFaceSelectionRef.current = null;
+      linkedFaceSelectionCacheRef.current = null;
+      clearLinkedFaceSelectionOverlay();
+      clearSelectionBoundaryLoopOverlay();
+      setLinkedFaceSelectionGraph(null);
+      setLinkedFaceSelection((current) => ({
+        ...current,
+        active: false,
+        count: 0,
+      }));
+      refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+      applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
+      refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current);
+      refreshSelectedObjectOutlines(
+        modelRoot,
+        hiddenObjectIdsRef.current,
+        selectedObjectIdRef.current,
+      );
+      refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
+      syncLooseEdgeLoopCapStates(modelRoot);
+      refreshSeparatedObjects();
+
+      await reportProgress("Done");
+    } finally {
+      setSeparationBusyState(false);
+      setSeparationProgress(null);
+    }
+  };
+
+  const handleCutBoundaryLoop = async (boundaryLoop: SelectionBoundaryLoop) => {
+    if (separationBusyRef.current) {
+      return;
+    }
+
+    const selection = linkedFaceSelectionRef.current;
+    const modelRoot = rootRef.current;
+
+    if (!selection || !modelRoot) {
+      return;
+    }
+
+    const objectIds = getTriangleObjectIds(selection.mesh);
+
+    if (!objectIds) {
+      return;
+    }
+
+    setSeparationBusyState(true);
+    const reportProgress = createThrottledProgressReporter(setSeparationProgress);
+
+    await reportProgress("Cutting boundary", true);
+
+    try {
+      clearSelectedLooseEdgeLoop();
+
+      if (!cutSelectionBoundaryLoopTopology(selection, boundaryLoop)) {
+        return;
+      }
+
+      const topology = buildMeshTopology(selection.mesh);
+
+      if (!topology) {
+        return;
+      }
+
+      await separateLooseObjectPartsAsync(
+        topology,
+        objectIds,
+        [selection.objectId],
+        () => {
+          const loosePartObjectId = nextSeparatedObjectIdRef.current;
+
+          nextSeparatedObjectIdRef.current += 1;
+
+          return loosePartObjectId;
+        },
+        reportProgress,
+      );
+
+      await reportProgress("Refreshing model");
+
+      rememberedTriangleSelectionRef.current = null;
+      linkedFaceSelectionRef.current = null;
+      linkedFaceSelectionCacheRef.current = null;
+      clearLinkedFaceSelectionOverlay();
+      clearSelectionBoundaryLoopOverlay();
+      setLinkedFaceSelectionGraph(null);
+      setLinkedFaceSelection((current) => ({
+        ...current,
+        active: false,
+        count: 0,
+      }));
+      refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+      applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
+      refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current);
+      refreshSelectedObjectOutlines(
+        modelRoot,
+        hiddenObjectIdsRef.current,
+        selectedObjectIdRef.current,
+      );
+      refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
+      syncLooseEdgeLoopCapStates(modelRoot);
+      refreshSeparatedObjects();
+
+      await reportProgress("Done");
+    } finally {
+      setSeparationBusyState(false);
+      setSeparationProgress(null);
+    }
+  };
+
+  const separateByBoundaryLoop = (loopId: number) => {
+    const loop = selectionBoundaryLoopsRef.current.find((item) => item.id === loopId);
+
+    if (!loop) {
+      return;
+    }
+
+    void handleCutBoundaryLoop(loop);
   };
 
   useEffect(() => {
     clearLinkedFaceSelectionHandlerRef.current = clearLinkedFaceSelection;
+    clearSelectedLooseEdgeLoopHandlerRef.current = clearSelectedLooseEdgeLoop;
     hideSelectedObjectHandlerRef.current = hideSelectedObject;
     selectLinkedFaceHandlerRef.current = selectLinkedFace;
+    selectLooseEdgeLoopHandlerRef.current = selectLooseEdgeLoop;
+    selectSeparatedObjectHandlerRef.current = selectSeparatedObject;
+    separateByBoundaryLoopHandlerRef.current = separateByBoundaryLoop;
+    setLooseEdgeLoopCapOffsetHandlerRef.current = setLooseEdgeLoopCapOffset;
+    setLooseEdgeLoopCapTargetHandlerRef.current = setLooseEdgeLoopCapTarget;
     showAllObjectsHandlerRef.current = showAllObjects;
+    syncLooseEdgeLoopCapStatesHandlerRef.current = syncLooseEdgeLoopCapStates;
   });
 
   useEffect(() => {
@@ -1684,7 +4504,7 @@ export default function Home() {
     let renderer: THREE.WebGLRenderer;
 
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true });
     } catch {
       const errorTimeout = window.setTimeout(() => {
         setLoadState("error");
@@ -1725,13 +4545,104 @@ export default function Home() {
 
     loaderRef.current = new GLTFLoader();
 
+    const capNormalTarget = new THREE.Object3D();
+    capNormalTarget.name = "cap-normal-target-overlay";
+    capNormalTarget.visible = false;
+    capNormalTarget.userData.isCapOffsetGizmoOverlay = true;
+    scene.add(capNormalTarget);
+    capNormalTargetRef.current = capNormalTarget;
+
+    const capNormalTransformControls = new TransformControls(camera, renderer.domElement);
+    capNormalTransformControls.setMode("translate");
+    capNormalTransformControls.setSpace("world");
+    capNormalTransformControls.setSize(0.7);
+    capNormalTransformControls.showXY = false;
+    capNormalTransformControls.showYZ = false;
+    capNormalTransformControls.showXZ = false;
+    capNormalTransformControls.setColors(0xef4444, 0x22c55e, 0x3b82f6, 0xfacc15);
+
+    const capNormalTransformHelper = capNormalTransformControls.getHelper();
+    capNormalTransformHelper.name = "cap-normal-transform-gizmo-overlay";
+    capNormalTransformHelper.visible = false;
+    capNormalTransformHelper.renderOrder = looseEdgeHoverRenderOrder + 1;
+    capNormalTransformHelper.traverse((child) => {
+      child.renderOrder = looseEdgeHoverRenderOrder + 1;
+      child.userData.isCapOffsetGizmoOverlay = true;
+
+      if (!isDisposableDrawObject(child)) {
+        return;
+      }
+
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+
+      materials.forEach((material) => {
+        material.depthTest = false;
+        material.depthWrite = false;
+        material.opacity = 0.96;
+        material.transparent = true;
+      });
+    });
+    scene.add(capNormalTransformHelper);
+    capNormalTransformControlsRef.current = capNormalTransformControls;
+    capNormalTransformHelperRef.current = capNormalTransformHelper;
+
+    const handleCapNormalTransformDragging = (event: { value: unknown }) => {
+      controls.enabled = event.value !== true;
+    };
+
+    const handleCapNormalTransformChange = () => {
+      const edge = selectedLooseEdgeLoopRef.current;
+      const target = capNormalTargetRef.current;
+
+      if (!edge || !target) {
+        return;
+      }
+
+      const targetWorld = target.getWorldPosition(new THREE.Vector3());
+      const targetLocal = edge.mesh.worldToLocal(targetWorld.clone());
+
+      setLooseEdgeLoopCapTargetHandlerRef.current?.(edge, targetLocal);
+    };
+
+    capNormalTransformControls.addEventListener(
+      "dragging-changed",
+      handleCapNormalTransformDragging,
+    );
+    capNormalTransformControls.addEventListener("objectChange", handleCapNormalTransformChange);
+
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
-    let pointerStart: { x: number; y: number } | null = null;
+    let pointerStart: { edge: HoveredEdge | null; x: number; y: number } | null = null;
 
     const clearHoveredEdge = () => {
-      clearHoverEdgeOverlay(hoveredEdgeRef.current);
+      const currentEdge = hoveredEdgeRef.current;
+
+      clearHoverEdgeOverlay(currentEdge);
+
+      if (
+        currentEdge?.isLooseEdge &&
+        !isSameLooseEdgeLoop(currentEdge, selectedLooseEdgeLoopRef.current)
+      ) {
+        setLooseEdgeLoopColor(currentEdge.mesh, currentEdge.loopId, looseEdgeColor);
+      }
+
       hoveredEdgeRef.current = null;
+    };
+
+    const setHoveredEdge = (edge: HoveredEdge) => {
+      if (edge.isLooseEdge) {
+        if (isSameLooseEdgeLoop(edge, selectedLooseEdgeLoopRef.current)) {
+          clearHoverEdgeOverlay(edge);
+        } else {
+          setHoverEdgeOverlay(edge);
+        }
+
+        hoveredEdgeRef.current = edge;
+        return;
+      }
+
+      hoveredEdgeRef.current = edge;
+      setHoverEdgeOverlay(edge);
     };
 
     const getMeshHitAtPointer = (event: PointerEvent) => {
@@ -1758,6 +4669,151 @@ export default function Home() {
       return hit ? getHoveredEdgeFromHit(hit) : null;
     };
 
+    const getLooseEdgeAtPointer = (event: PointerEvent) => {
+      const viewport = renderer.domElement.getBoundingClientRect();
+      let closestEdge: HoveredEdge | null = null;
+      let closestDistance = looseEdgeHoverHitTolerancePx;
+
+      modelRoot.updateMatrixWorld(true);
+      modelRoot.traverse((child) => {
+        if (!isSelectableMesh(child)) {
+          return;
+        }
+
+        const segmentsByKey = child.userData.looseEdgeSegmentsByKey as
+          | Map<string, LooseEdgeSegment>
+          | undefined;
+
+        if (!(segmentsByKey instanceof Map)) {
+          return;
+        }
+
+        segmentsByKey.forEach((segment) => {
+          if (hiddenObjectIdsRef.current.has(segment.objectId)) {
+            return;
+          }
+
+          const start = getScreenPoint(
+            segment.start.clone().applyMatrix4(child.matrixWorld),
+            camera,
+            viewport,
+          );
+          const end = getScreenPoint(
+            segment.end.clone().applyMatrix4(child.matrixWorld),
+            camera,
+            viewport,
+          );
+
+          if (!start || !end) {
+            return;
+          }
+
+          const distance = getPointToSegmentDistance(
+            event.clientX,
+            event.clientY,
+            start.x,
+            start.y,
+            end.x,
+            end.y,
+          );
+
+          if (distance > closestDistance) {
+            return;
+          }
+
+          closestDistance = distance;
+          closestEdge = {
+            end: segment.end,
+            isLooseEdge: true,
+            key: segment.edgeKey,
+            loopId: segment.loopId,
+            mesh: child,
+            objectId: segment.objectId,
+            start: segment.start,
+          };
+        });
+      });
+
+      return closestEdge;
+    };
+
+    const getSelectionBoundaryEdgeAtPointer = (event: PointerEvent) => {
+      const selection = linkedFaceSelectionRef.current;
+
+      if (
+        !separateModeActiveRef.current ||
+        !selection ||
+        hiddenObjectIdsRef.current.has(selection.objectId)
+      ) {
+        return null;
+      }
+
+      const boundaryLoops = selectionBoundaryLoopsRef.current;
+
+      if (boundaryLoops.length === 0) {
+        return null;
+      }
+
+      const viewport = renderer.domElement.getBoundingClientRect();
+      const start = new THREE.Vector3();
+      const end = new THREE.Vector3();
+      const startWorld = new THREE.Vector3();
+      const endWorld = new THREE.Vector3();
+      let closestEdge: HoveredEdge | null = null;
+      let closestDistance = looseEdgeHoverHitTolerancePx;
+
+      selection.mesh.updateMatrixWorld(true);
+
+      boundaryLoops.forEach((loop) => {
+        for (let index = 0; index < loop.positions.length; index += 6) {
+          start.set(loop.positions[index], loop.positions[index + 1], loop.positions[index + 2]);
+          end.set(loop.positions[index + 3], loop.positions[index + 4], loop.positions[index + 5]);
+
+          const startScreen = getScreenPoint(
+            startWorld.copy(start).applyMatrix4(selection.mesh.matrixWorld),
+            camera,
+            viewport,
+          );
+          const endScreen = getScreenPoint(
+            endWorld.copy(end).applyMatrix4(selection.mesh.matrixWorld),
+            camera,
+            viewport,
+          );
+
+          if (!startScreen || !endScreen) {
+            continue;
+          }
+
+          const distance = getPointToSegmentDistance(
+            event.clientX,
+            event.clientY,
+            startScreen.x,
+            startScreen.y,
+            endScreen.x,
+            endScreen.y,
+          );
+
+          if (distance > closestDistance) {
+            continue;
+          }
+
+          closestDistance = distance;
+          closestEdge = {
+            boundaryPositions: loop.positions,
+            end: end.clone(),
+            isSelectionBoundary: true,
+            key: `selection-boundary:${loop.id}:${index}`,
+            loopId: loop.id,
+            mesh: selection.mesh,
+            objectId: selection.objectId,
+            start: start.clone(),
+          };
+        }
+      });
+
+      return closestEdge;
+    };
+
     const getTriangleAtPointer = (event: PointerEvent) => {
       const hit = getMeshHitAtPointer(event);
 
@@ -1771,12 +4827,169 @@ export default function Home() {
       };
     };
 
+    const finishCapOffsetDrag = (event?: PointerEvent) => {
+      const drag = capOffsetDragRef.current;
+
+      if (!drag) {
+        return false;
+      }
+
+      if (event && renderer.domElement.hasPointerCapture(drag.pointerId)) {
+        renderer.domElement.releasePointerCapture(drag.pointerId);
+      }
+
+      capOffsetDragRef.current = null;
+      controls.enabled = true;
+
+      return true;
+    };
+
+    const isCapNormalTransformActive = () =>
+      capNormalTransformControls.dragging || capNormalTransformControls.axis !== null;
+
+    const getCapOffsetDragAtPointer = (event: PointerEvent): CapOffsetDragState | null => {
+      const handle = capOffsetGizmoHandleRef.current;
+      const edge = selectedLooseEdgeLoopRef.current;
+
+      if (!handle || !edge || !handle.visible) {
+        return null;
+      }
+
+      const key = getLooseEdgeLoopFillKey(edge);
+      const state = looseEdgeLoopCapStatesRef.current.get(key);
+      const axisData = state
+        ? getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget)
+        : null;
+
+      if (!state || !axisData || isNormalTargetLoopMode(state.mode)) {
+        return null;
+      }
+
+      const rect = renderer.domElement.getBoundingClientRect();
+
+      edge.mesh.updateMatrixWorld(true);
+
+      const targetOffset = axisData.axis.clone().multiplyScalar(state.offset);
+      const loopSize = new THREE.Box3()
+        .setFromPoints(axisData.data.points)
+        .getSize(new THREE.Vector3());
+      const loopSpan = Math.max(loopSize.x, loopSize.y, loopSize.z);
+      const visualLength = Math.max(
+        targetOffset.length(),
+        loopSpan * 0.12,
+        capOffsetGizmoMinLength,
+      );
+      const startScreen = getScreenPoint(
+        edge.mesh.localToWorld(axisData.data.center.clone()),
+        camera,
+        rect,
+      );
+      const endScreen = getScreenPoint(
+        edge.mesh.localToWorld(
+          axisData.data.center.clone().addScaledVector(axisData.axis, visualLength),
+        ),
+        camera,
+        rect,
+      );
+
+      if (!startScreen || !endScreen) {
+        return null;
+      }
+
+      const hitDistance = getPointToSegmentDistance(
+        event.clientX,
+        event.clientY,
+        startScreen.x,
+        startScreen.y,
+        endScreen.x,
+        endScreen.y,
+      );
+
+      if (hitDistance > capOffsetGizmoHitTolerancePx) {
+        return null;
+      }
+
+      const screenAxis = new THREE.Vector2(0, -1);
+      let pixelsPerOffsetUnit = 80;
+
+      screenAxis.set(endScreen.x - startScreen.x, endScreen.y - startScreen.y);
+      pixelsPerOffsetUnit = screenAxis.length() / visualLength;
+
+      if (pixelsPerOffsetUnit >= 4) {
+        screenAxis.normalize();
+      } else {
+        screenAxis.set(0, -1);
+        pixelsPerOffsetUnit = 80;
+      }
+
+      return {
+        edge,
+        pixelsPerOffsetUnit,
+        pointerId: event.pointerId,
+        screenAxis,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startOffset: state.offset,
+      };
+    };
+
+    const updateCapOffsetDrag = (event: PointerEvent) => {
+      const drag = capOffsetDragRef.current;
+
+      if (!drag) {
+        return false;
+      }
+
+      if (!drag.screenAxis || !drag.pixelsPerOffsetUnit) {
+        return false;
+      }
+
+      const deltaPixels = new THREE.Vector2(
+        event.clientX - drag.startClientX,
+        event.clientY - drag.startClientY,
+      ).dot(drag.screenAxis);
+
+      setLooseEdgeLoopCapOffsetHandlerRef.current?.(
+        drag.edge,
+        drag.startOffset + deltaPixels / drag.pixelsPerOffsetUnit,
+      );
+      event.preventDefault();
+
+      return true;
+    };
+
     const handlePointerDown = (event: PointerEvent) => {
       if (event.button !== 0) {
         return;
       }
 
+      if (isCapNormalTransformActive()) {
+        pointerStart = null;
+        clearHoveredEdge();
+        return;
+      }
+
+      const capOffsetDrag = getCapOffsetDragAtPointer(event);
+
+      if (capOffsetDrag) {
+        capOffsetDragRef.current = capOffsetDrag;
+        pointerStart = null;
+        controls.enabled = false;
+        clearHoveredEdge();
+        renderer.domElement.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        return;
+      }
+
+      const clickedEdge = !event.shiftKey
+        ? hoveredEdgeRef.current?.isSelectionBoundary === true ||
+          hoveredEdgeRef.current?.isLooseEdge === true
+          ? hoveredEdgeRef.current
+          : (getSelectionBoundaryEdgeAtPointer(event) ?? getLooseEdgeAtPointer(event))
+        : null;
+
       pointerStart = {
+        edge: clickedEdge,
         x: event.clientX,
         y: event.clientY,
       };
@@ -1794,15 +5007,19 @@ export default function Home() {
         return;
       }
 
-      hoveredEdgeRef.current = edge;
-      setHoverEdgeOverlay(edge);
+      setHoveredEdge(edge);
     };
 
     const handlePointerUp = (event: PointerEvent) => {
+      if (finishCapOffsetDrag(event)) {
+        return;
+      }
+
       if (event.button !== 0 || !pointerStart) {
         return;
       }
 
+      const clickedEdge = pointerStart.edge;
       const moveDistance = Math.hypot(
         event.clientX - pointerStart.x,
         event.clientY - pointerStart.y,
@@ -1813,12 +5030,35 @@ export default function Home() {
         return;
       }
 
+      if (separationBusyRef.current) {
+        return;
+      }
+
       if (!event.shiftKey) {
+        if (clickedEdge?.isSelectionBoundary && clickedEdge.loopId != null) {
+          separateByBoundaryLoopHandlerRef.current?.(clickedEdge.loopId);
+          return;
+        }
+
+        if (clickedEdge?.isLooseEdge) {
+          selectLooseEdgeLoopHandlerRef.current?.(clickedEdge);
+          return;
+        }
+
+        clearSelectedLooseEdgeLoopHandlerRef.current?.();
         clearHoveredEdge();
         const triangle = getTriangleAtPointer(event);
 
         if (triangle) {
-          selectLinkedFaceHandlerRef.current?.(triangle.mesh, triangle.triangleIndex);
+          const objectId = getTriangleObjectId(triangle.mesh, triangle.triangleIndex);
+
+          if (separateModeActiveRef.current && selectedObjectIdRef.current === objectId) {
+            rememberTriangleSelection(triangle.mesh, triangle.triangleIndex);
+            selectLinkedFaceHandlerRef.current?.(triangle.mesh, triangle.triangleIndex);
+          } else {
+            rememberTriangleSelection(triangle.mesh, triangle.triangleIndex);
+            selectSeparatedObjectHandlerRef.current?.(objectId);
+          }
         } else {
           clearLinkedFaceSelectionHandlerRef.current?.();
         }
@@ -1837,25 +5077,44 @@ export default function Home() {
       }
 
       clearHoveredEdge();
+      clearSelectedLooseEdgeLoopHandlerRef.current?.();
       clearLinkedFaceSelectionHandlerRef.current?.();
       refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
       applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
       refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current);
+      refreshSelectedObjectOutlines(
+        modelRoot,
+        hiddenObjectIdsRef.current,
+        selectedObjectIdRef.current,
+      );
+      refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
+      syncLooseEdgeLoopCapStatesHandlerRef.current?.(modelRoot);
     };
 
     const handlePointerMove = (event: PointerEvent) => {
-      if (!event.shiftKey) {
+      if (isCapNormalTransformActive()) {
         clearHoveredEdge();
         return;
       }
 
-      const edge = getEdgeAtPointer(event);
+      if (updateCapOffsetDrag(event)) {
+        return;
+      }
+
+      const edge = event.shiftKey
+        ? getEdgeAtPointer(event)
+        : (getSelectionBoundaryEdgeAtPointer(event) ?? getLooseEdgeAtPointer(event));
+      const currentEdge = hoveredEdgeRef.current;
 
       if (
-        hoveredEdgeRef.current &&
+        currentEdge &&
         edge &&
-        hoveredEdgeRef.current.mesh === edge.mesh &&
-        hoveredEdgeRef.current.key === edge.key
+        currentEdge.mesh === edge.mesh &&
+        currentEdge.isLooseEdge === edge.isLooseEdge &&
+        currentEdge.isSelectionBoundary === edge.isSelectionBoundary &&
+        (edge.isLooseEdge || edge.isSelectionBoundary
+          ? currentEdge.loopId === edge.loopId
+          : currentEdge.key === edge.key)
       ) {
         return;
       }
@@ -1866,12 +5125,19 @@ export default function Home() {
         return;
       }
 
-      hoveredEdgeRef.current = edge;
-      setHoverEdgeOverlay(edge);
+      setHoveredEdge(edge);
     };
 
     const handlePointerLeave = () => {
+      if (capOffsetDragRef.current || isCapNormalTransformActive()) {
+        return;
+      }
+
       clearHoveredEdge();
+    };
+
+    const handlePointerCancel = (event: PointerEvent) => {
+      finishCapOffsetDrag(event);
     };
 
     const handleKeyUp = (event: KeyboardEvent) => {
@@ -1903,6 +5169,7 @@ export default function Home() {
     renderer.domElement.addEventListener("pointermove", handlePointerMove);
     renderer.domElement.addEventListener("pointerleave", handlePointerLeave);
     renderer.domElement.addEventListener("pointerup", handlePointerUp);
+    renderer.domElement.addEventListener("pointercancel", handlePointerCancel);
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("keyup", handleKeyUp);
 
@@ -1936,8 +5203,24 @@ export default function Home() {
       renderer.domElement.removeEventListener("pointermove", handlePointerMove);
       renderer.domElement.removeEventListener("pointerleave", handlePointerLeave);
       renderer.domElement.removeEventListener("pointerup", handlePointerUp);
+      renderer.domElement.removeEventListener("pointercancel", handlePointerCancel);
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
+      capNormalTransformControls.removeEventListener(
+        "dragging-changed",
+        handleCapNormalTransformDragging,
+      );
+      capNormalTransformControls.removeEventListener(
+        "objectChange",
+        handleCapNormalTransformChange,
+      );
+      removeCapOffsetGizmo();
+      capNormalTransformHelper.parent?.remove(capNormalTransformHelper);
+      capNormalTransformControls.dispose();
+      capNormalTarget.parent?.remove(capNormalTarget);
+      capNormalTargetRef.current = null;
+      capNormalTransformControlsRef.current = null;
+      capNormalTransformHelperRef.current = null;
       clearModel(modelRoot);
       rootRef.current = null;
       cameraRef.current = null;
@@ -1978,7 +5261,13 @@ export default function Home() {
     nextSeparatedObjectIdRef.current = 1;
     hiddenObjectIdsRef.current = new Set();
     objectNamesRef.current = {};
+    rememberedTriangleSelectionRef.current = null;
     selectedObjectIdRef.current = null;
+    setSeparateModeActiveState(false);
+    setSeparationBusyState(false);
+    setSeparationProgress(null);
+    clearLooseEdgeLoopCapStates();
+    clearSelectedLooseEdgeLoop();
     clearLinkedFaceSelection();
     setSeparatedObjects([]);
     setSelectedObjectId(null);
@@ -2004,6 +5293,12 @@ export default function Home() {
         refreshObjectMaterialGroups(model, hiddenObjectIdsRef.current);
         applyObjectColors(model, hiddenObjectIdsRef.current);
         refreshObjectWireframes(model, hiddenObjectIdsRef.current);
+        refreshSelectedObjectOutlines(
+          model,
+          hiddenObjectIdsRef.current,
+          selectedObjectIdRef.current,
+        );
+        refreshLooseEdgeOverlays(model, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
         setSeparatedObjects(
           collectSeparatedObjects(modelRoot, hiddenObjectIdsRef.current, objectNamesRef.current),
         );
@@ -2023,7 +5318,11 @@ export default function Home() {
 
   return (
     <main className="fixed inset-0 overflow-hidden bg-neutral-200 text-neutral-950">
-      <div ref={mountRef} className="absolute inset-0" aria-label="3D viewport" />
+      <div
+        ref={mountRef}
+        className={`absolute inset-0 ${separateModeActive ? "cursor-crosshair" : ""}`}
+        aria-label="3D viewport"
+      />
 
       <TopBar
         inputRef={inputRef}
@@ -2042,11 +5341,21 @@ export default function Home() {
         graph={linkedFaceSelectionGraph}
         graphHeight={linkedFaceSelectionGraphHeight}
         graphWidth={linkedFaceSelectionGraphWidth}
+        isAvailable={selectedObjectId != null}
+        isModeActive={separateModeActive}
+        isProcessing={separationBusy}
         maxAngle={maxLinkedFaceSelectionAngle}
+        progressText={separationProgress}
         selection={linkedFaceSelection}
-        onClear={clearLinkedFaceSelection}
+        onClear={() => clearLinkedFaceSelection(false)}
         onCommitThreshold={commitLinkedFaceSelectionThreshold}
         onSeparate={handleSeparateSelection}
+        onToggleMode={toggleSeparateMode}
+      />
+      <LoopPanel
+        active={selectedLooseEdgeLoopActive}
+        mode={looseEdgeLoopMode}
+        onModeChange={handleLooseEdgeLoopModeChange}
       />
     </main>
   );
