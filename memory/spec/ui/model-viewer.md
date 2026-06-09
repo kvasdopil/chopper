@@ -9,13 +9,19 @@ Related documents:
 - [UI specs index](index.md): Parent catalog for viewer UI requirements. Read this to find other UI-facing specifications.
 - [Specifications index](../index.md): Parent catalog for all normative requirements. Read this when deciding whether a rule belongs in UI, domain, project, or testing docs.
 - [Memory Bank principles](../../mbb/principles.md): Governance for single-source-of-truth documentation. Read this before splitting or duplicating viewer behavior.
-- [Viewer page code](../../../src/app/page.tsx): Current implementation of geometry, selection, separation, and viewport state. Use this as the source of truth for implementation details.
+- [Viewer entry](../../../src/app/page.tsx): Thin app route that composes the model viewer with the default tool list. Use this when adding or removing whole viewer tools.
+- [Viewer component](../../../src/app/model-viewer/model-viewer.tsx): Current implementation of geometry, selection, separation, and viewport state. Use this as the source of truth for implementation details.
+- [Viewer persistence](../../../src/app/model-viewer/persistence.ts): IndexedDB storage helper for the current viewer snapshot. Use this when changing refresh survival or saved viewer state.
+- [Viewer tools](../../../src/app/model-viewer/tools): Tool registry and tool-owned panel adapters. Use this when adding, removing, or disabling feature tools.
 - [Viewer controls](../../../src/app/viewer-controls): Current TSX control components for the load/status bar, object list, and linked-face panel. Use this when changing UI presentation.
 
 ## Viewer Requirements
 
 - The app displays a full-screen Three.js viewport for `.glb` files.
 - Loading a GLB normalizes the model to fit the viewer and frames the camera around the model.
+- The app persists one current viewer snapshot in IndexedDB so a browser refresh restores the active GLB and durable user edits. The persisted snapshot contains the source GLB bytes plus only state needed to rebuild user edits: separated object IDs, object names, hidden object IDs, next object ID, topology-cut IDs, mesh position buffers only for meshes whose positions were edited, and per-loop cap/extrusion/cylinder mode/offset/normal-target data. Runtime-only state such as camera position, orbit target, hover state, selection state, separation progress, and generated overlay mesh instances is not persisted.
+- Opening a new valid `.glb` resets the saved snapshot before parsing the new file. If the new load fails, the previous saved file must not be restored on the next refresh.
+- Loading, restore, and persistence failures keep the viewer from silently failing. User-facing failures update the status text where applicable and show a toast.
 - The viewer renders front-facing triangles only.
 - Default faces are light gray; separated objects use distinct pronounced colors.
 - Wireframes are thin, dark gray, nearly transparent line segments.
@@ -29,6 +35,8 @@ Related documents:
 - Rebuilding loose-edge groups after mesh topology changes updates cap/extrusion state by stable loop segment keys. Cap/extrusion meshes are computed lazily only when the user selects a non-`None` loop mode; grouping loose edges must not eagerly create cap/extrusion meshes.
 - Hidden objects must not render faces, wireframe lines, or loose-edge lines and must be excluded from pointer picking.
 - Camera orbit uses `OrbitControls`; panning moves the current focus point and rotation stays around that focus.
+- The route composes the viewer as `<ModelViewer tools={defaultViewerTools} />`. Generic viewport responsibilities stay in `ModelViewer`: camera/renderer lifecycle, GLB load/restore, object selection, object visibility, object list, top bar, status, toasts, and shared mesh refresh operations. Feature surfaces are registered by `ViewerTool` ID.
+- The default tool registry contains `separation` and `edge-loop-cap`. Removing a tool from `defaultViewerTools` hides its panel and makes its pointer/state handlers inert. Current tool modules own their panels through small adapters; the heavier geometry algorithms still live in `ModelViewer` until a later extraction can move them safely behind richer tool contracts.
 - The viewer does not own a dev-server lifecycle in documentation or code workflows; the user launches the server when needed.
 
 ## Object Workflow
@@ -99,6 +107,12 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `disposeObject`: disposes all geometries and materials reachable from an object.
 - `clearModel`: removes and disposes all loaded model children from the root group.
 - `getVertexKey`: converts a vertex position into a stable precision-rounded topology key.
+- `cloneArrayBuffer`: copies source GLB bytes before storing or parsing them.
+- `cloneFloat32Array`: copies persisted mesh position buffers.
+- `cloneUint32Array`: copies persisted object ID and topology ID buffers.
+- `hasNonDefaultObjectIds`: detects whether a mesh needs object IDs persisted.
+- `hasNonZeroTopologyIds`: detects whether a mesh needs topology-cut IDs persisted.
+- `getPersistedLoopSegmentKey`: creates the stable loop segment key used to restore cap/extrusion/cylinder state after Three.js UUIDs change.
 - `ensureVertexTopologyIds`: initializes the invisible per-vertex topology IDs used to cut connectivity without moving geometry.
 - `getNextVertexTopologyId`: returns the next unused topology ID for a mesh position buffer.
 - `getLooseEdgeKey`: creates the object-scoped key used to cache selected-object loose edges.
@@ -189,14 +203,28 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `normalizeModel`: scales and centers a loaded model into the target viewer size.
 - `frameModel`: places the camera and orbit target around the loaded model.
 - `isSelectableMesh`: excludes overlay meshes from picking and topology operations.
+- `collectSelectableMeshes`: returns selectable meshes in stable traversal order for persistence and restore.
+- `getMaxObjectId`: finds the highest object ID currently assigned in a restored model.
+- `getPersistedMeshState`: serializes only needed per-mesh edit data.
+- `getPersistedLoopCapState`: serializes one generated loop state by stable mesh order and loop segment keys.
+- `createPersistedViewerState`: builds the IndexedDB snapshot from current source bytes and durable edit state.
+- `applyPersistedMeshStates`: reapplies saved mesh edits after GLB parsing and styling.
+- `getRestoredObjectNames`: converts persisted string-keyed object names back to numeric object IDs.
+- `getLooseEdgeLoopFromPersistedState`: resolves a saved loop state against rebuilt loose-edge loops.
+- `createLooseEdgeFromLoop`: creates a minimal loop reference used to regenerate persisted caps/extrusions/cylinders.
 
-### Viewer Page State Handlers
+### Viewer Component State Handlers
 
-- `Home`: owns the Three.js scene, model state, selection state, and control props.
+- `ModelViewer`: owns the Three.js scene, model state, selection state, enabled tool IDs, and control props.
+- `showToast`: displays transient load/restore/persistence failure feedback.
+- `persistViewerStateNow`: writes the current viewer snapshot to IndexedDB.
+- `schedulePersistViewerState`: debounces IndexedDB writes for frequent edit updates.
+- `clearScheduledPersistenceSave`: cancels a pending debounced persistence write.
 - `clearLinkedFaceSelectionOverlay`: removes the linked-face line overlay.
 - `removeLooseEdgeLoopCapFill`: removes one cap state's mesh while preserving or clearing state as directed by the caller.
 - `removeCapOffsetGizmo`: removes the selected-loop cap offset gizmo, hides the `Ex. N` transform gizmo, and ends any active cap-offset drag.
 - `clearLooseEdgeLoopCapStates`: removes all cap state and cap meshes, used when loading a new model.
+- `restoreLooseEdgeLoopCapStates`: restores persisted cap/extrusion/cylinder modes by resolving stable loop segment keys after loose-edge groups are rebuilt.
 - `refreshLooseEdgeLoopCapVisibility`: updates generated cap/extrusion/cylinder mesh visibility from hidden object IDs and applies object/loop selection occlusion overlay render state.
 - `refreshCapOffsetGizmo`: creates, updates, or hides the selected-loop cap offset gizmo from the current cap state, using an arrow helper for fixed-axis extrusions and a three-axis translate gizmo for `Ex. N`; `Filled` mode has no gizmo.
 - `rebuildLooseEdgeLoopCapFill`: regenerates a cap/extrusion mesh after the mode or offset changes.
@@ -206,6 +234,7 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `setLooseEdgeLoopCapOffset`: updates one loop's stored cap offset and regenerates its cap/extrusion mesh.
 - `setLooseEdgeLoopCapTarget`: updates one `Ex. N` loop's stored normal-axis target and regenerates its cap/extrusion mesh.
 - `clearSelectedLooseEdgeLoop`: clears the secondary loose-edge loop selection and selected-loop overlay while leaving cap meshes intact.
+- `resetViewerStateForModelLoad`: clears runtime selection/progress/cap state before loading or restoring a model.
 - `selectLooseEdgeLoop`: selects a hovered loose-edge loop, shows it in yellow, and refreshes the active loop mode.
 - `handleLooseEdgeLoopModeChange`: updates the selected loop's per-loop cap mode from the loop panel.
 - `rememberTriangleSelection`: stores the latest mesh-clicked triangle as the candidate origin for later separate-mode selection.
@@ -241,7 +270,25 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `handleKeyDown`: handles `h`, `Option+H`, and `Command+H` visibility shortcuts.
 - `handleResize`: keeps renderer, camera, and fat-line overlay resolutions in sync with viewport size.
 - `render`: runs the animation frame loop.
-- `handleFileChange`: validates and loads `.glb` files, resets viewer state, styles the model, and frames the camera.
+- `loadModelIntoViewer`: parses source GLB bytes, rebuilds Three.js-derived model state, reapplies optional persisted edits, and frames the camera.
+- `restorePersistedViewerState`: reads the IndexedDB snapshot on startup and restores it after the Three.js scene is ready.
+- `openGlbFile`: validates a selected `.glb`, clears the saved snapshot for the new file, loads it from bytes, and persists the fresh source.
+- `handleFileChange`: extracts the selected file from the hidden input and dispatches GLB loading.
+
+### Persistence Module
+
+- `readPersistedViewerState`: opens IndexedDB and reads the current viewer snapshot.
+- `savePersistedViewerState`: writes the current viewer snapshot to IndexedDB.
+- `clearPersistedViewerState`: deletes the current viewer snapshot when a new GLB is opened or a saved restore is invalid.
+
+### Tool Modules
+
+- `ViewerTool`: describes a removable viewer feature by stable ID.
+- `defaultViewerTools`: composes the default viewer feature set from `separationTool` and `edgeLoopCapTool`.
+- `separationTool`: registers the linked-face separation feature under the `separation` ID.
+- `SeparationToolPanel`: owns rendering of the linked-face separation panel.
+- `edgeLoopCapTool`: registers loose-edge loop cap/extrude/cylinder tooling under the `edge-loop-cap` ID.
+- `EdgeLoopCapToolPanel`: owns rendering of the loop cap/extrude/cylinder panel.
 
 ### Control Components
 
