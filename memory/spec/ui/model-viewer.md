@@ -27,15 +27,15 @@ Related documents:
 - The viewer renders front-facing triangles only.
 - Default faces are light gray; separated objects use distinct pronounced colors.
 - Wireframes are thin, dark gray, nearly transparent line segments.
-- Loose edges render only for the currently selected object. They are defined as edges connected to exactly one triangle within that visible object and render above other edge overlays. Unobstructed loose edges render as thick `3px` lines; obstructed loose edges render as thinner `1px` lines. Closed loose-edge loops with no cap/extrusion/cylinder state render red, and closed loose-edge loops with a cap/extrusion/cylinder state render green.
-- Hovering within `5px` of an unobstructed loose edge on any visible submesh temporarily highlights that edge's connected loose-edge loop with a pronounced yellow `6px` UI overlay rendered above model geometry. Loose-edge loops are precomputed when the loose-edge overlay is rebuilt, kept object-scoped, pruned to closed cycle cores by stripping dangling/open edge branches, and hover uses the cached loop positions without rebuilding topology. Loose-edge segments that are not part of a closed loop remain outside loop hover, selection, and cap generation.
-- Clicking a hovered loose-edge loop selects that loop, clears any selected mesh/object state, and displays it with a yellow `4px` UI overlay. Loose-edge loop hover and selection work on any visible submesh, even when the red/green loose-edge overlay is only visible for the currently selected object.
-- When a loose-edge loop is selected, the loop panel appears. Cap/extrusion mode is stored per loose-edge loop. The default mode is `None`. `Filled` mode creates an ephemeral, non-selectable cap mesh from the loop's unique points plus a center point, with triangles from the center to each loop segment. `Ex. X`, `Ex. Y`, `Ex. Z`, and `Ex. N` create ephemeral, non-selectable extrusions from the loop along the signed local X, Y, Z, or loop-normal axis, using an extrusion length equal to the parent object's projected size along that axis, then add an end cap perpendicular to the extrusion axis. `Cyl. X`, `Cyl. Y`, `Cyl. Z`, and `Cyl. N` create the same simple cap plus a 16-sided cylinder centered on the loop center and oriented along the matching X, Y, Z, or loop-normal axis. Cylinder radius is `80%` of the minimum distance from the loop center to a loop vertex. Cap, extrusion, and cylinder triangles are wound so their front faces point outside the parent object, but generated materials render double-sided so incorrect normals do not hide the generated faces. Generated caps/extrusions/cylinders use the parent object's face color, do not appear in the object list, remain visible after loop selection is cleared, and follow the parent object's visibility.
-- If a loose-edge loop has exactly one matching loop on another object with the same topology-free boundary segments, the two loops are treated as one paired boundary for cap/extrusion/cylinder edits. Changing mode, offset, or `Normal` target on either side updates generated geometry for both objects. Each object still owns its own generated mesh for visibility/export/material grouping, and paired members store a shared world-space cap axis as local target points so generated halves stay aligned from the shared boundary.
-- When any object or loose-edge loop is selected, visible generated cap/extrusion/cylinder meshes keep their normal opaque rendering for unobstructed fragments and add a shared-geometry occlusion overlay for obstructed fragments. The occlusion overlay renders at `30%` opacity, uses a greater-depth test, and skips pixels already marked by the generated mesh stencil so only model-obstructed fragments show through. This is a material/render-state change only; generated geometry is not rebuilt for overlay display.
-- Each cap/extrusion/cylinder stores a per-loop signed offset along its active cap axis, so extrusion and cylinder generation can extend from the loop in either direction. `Filled` stays at offset `0` along the loop normal and does not display a viewport gizmo; extrusion and cylinder modes default to the object projected size along the selected axis, falling back to a small loop-sized offset when that projection is degenerate. While the loop is selected and its cap mode is `Ex. X`, `Ex. Y`, `Ex. Z`, `Cyl. X`, `Cyl. Y`, or `Cyl. Z`, a non-selectable `THREE.ArrowHelper` viewport gizmo appears on the signed cap offset side. Dragging within `10px` of the visible arrow updates the stored offset and regenerates that loop's generated mesh; dragging elsewhere keeps camera orbit/pan behavior. For `Ex. N` and `Cyl. N`, a standard three-axis `TransformControls` translate gizmo appears at the normal-axis target instead; the axis points from the loop centroid toward that target, defaults to the loop normal, and updates as the target is moved along any world axis.
+- Loose edges render only for the currently selected object. They are defined as edges connected to exactly one triangle within that visible object and render above other edge overlays. Unobstructed loose edges render as thick `3px` lines; obstructed loose edges render as thinner `1px` lines. Loose-edge contact spans with no cap/extrusion/cylinder state render red, and contact spans with a cap/extrusion/cylinder state render green.
+- Hovering within `5px` of an unobstructed loose edge on any visible submesh temporarily highlights that edge's connected loose-edge contact span with a pronounced yellow `6px` UI overlay rendered above model geometry. Loose-edge contact spans are precomputed when the loose-edge overlay is rebuilt: loose-edge components are kept object-scoped, connected by topology-free vertex positions so topology cuts do not fragment one visual boundary, pruned to closed cycle cores by stripping dangling/open edge branches, then split into connected runs with the same topology-free contact ownership. Hover uses the cached span positions without rebuilding topology. Loose-edge segments that are not part of a closed cycle core remain outside span hover, selection, and cap generation.
+- Clicking a hovered loose-edge contact span selects that span, clears any selected mesh/object state, and displays it with a yellow `4px` UI overlay. Loose-edge contact-span hover and selection work on any visible submesh, even when the red/green loose-edge overlay is only visible for the currently selected object.
+- When a loose-edge contact span is selected, the loop panel appears. Cap/extrusion mode is stored per contact span. The default mode is `None`. Open contact spans are force-closed for generated cap/extrusion/cylinder geometry by adding virtual closing segments between open endpoints; this does not change source mesh topology. `Filled` mode creates an ephemeral, non-selectable cap mesh from the loop's unique points plus a center point, with triangles from the center to each real or virtual loop segment. `Ex. X`, `Ex. Y`, `Ex. Z`, and `Ex. N` create ephemeral, non-selectable extrusions from the loop along the signed local X, Y, Z, or loop-normal axis, using an extrusion length equal to the parent object's projected size along that axis, then add an end cap perpendicular to the extrusion axis. `Cyl. X`, `Cyl. Y`, `Cyl. Z`, and `Cyl. N` create the same simple cap plus a 16-sided cylinder centered on the loop center and oriented along the matching X, Y, Z, or loop-normal axis. Cylinder radius is `80%` of the minimum distance from the loop center to a loop vertex. Cap, extrusion, and cylinder triangles are wound so their front faces point outside the parent object, but generated materials render double-sided so incorrect normals do not hide the generated faces. Generated caps/extrusions/cylinders use the parent object's face color, do not appear in the object list, remain visible after loop selection is cleared, and follow the parent object's visibility.
+- If a loose-edge contact span has exactly one matching span on another object with the same topology-free boundary segments, the two spans are treated as one paired boundary for cap/extrusion/cylinder edits. Changing mode, offset, or `Normal` target on either side updates generated geometry for both objects. Each object still owns its own generated mesh for visibility/export/material grouping, and paired members store a shared world-space cap axis as local target points so generated halves stay aligned from the shared boundary.
+- When any object or loose-edge contact span is selected, visible generated cap/extrusion/cylinder meshes keep their normal opaque rendering for unobstructed fragments and add a shared-geometry occlusion overlay for obstructed fragments. The occlusion overlay renders at `30%` opacity, uses a greater-depth test, and skips pixels already marked by the generated mesh stencil so only model-obstructed fragments show through. This is a material/render-state change only; generated geometry is not rebuilt for overlay display.
+- Each cap/extrusion/cylinder stores a per-loop signed offset along its active cap axis, so extrusion and cylinder generation can extend from the loop in either direction. `Filled` stays at offset `0` along the loop normal and does not display a viewport gizmo; extrusion and cylinder modes default to the object projected size along the selected axis, falling back to a small loop-sized offset when that projection is degenerate. While the loop is selected and its cap mode is `Ex. X`, `Ex. Y`, `Ex. Z`, `Cyl. X`, `Cyl. Y`, or `Cyl. Z`, a non-selectable `THREE.ArrowHelper` viewport gizmo appears on the signed cap offset side. Dragging near the visible arrow updates the stored offset and regenerates that loop's generated mesh; force-closed contact spans use a wider arrow hit target so the drag is captured before camera orbit starts. Dragging elsewhere keeps camera orbit/pan behavior. For `Ex. N` and `Cyl. N`, a standard three-axis `TransformControls` translate gizmo appears at the normal-axis target instead; the axis points from the loop centroid toward that target, defaults to the loop normal, and updates as the target is moved along any world axis.
 - The loop panel is positioned at the top-left below the load/status controls. It presents loop generation as two controls: `Mode` (`None`, `Cap`, `Extrude`, `Cylinder`) and `Axis` (`X`, `Y`, `Z`, `Normal`). Axis is enabled only for `Extrude` and `Cylinder`; `Cap` maps to the simple filled-cap mode.
-- Rebuilding loose-edge groups after mesh topology changes updates cap/extrusion state by stable loop segment keys for closed loose-edge loops only. Cap/extrusion meshes are computed lazily only when the user selects a non-`None` loop mode; grouping loose edges must not eagerly create cap/extrusion meshes.
+- Rebuilding loose-edge groups after mesh topology changes updates cap/extrusion state by stable contact-span segment keys. Cap/extrusion meshes are computed lazily only when the user selects a non-`None` loop mode; grouping loose edges must not eagerly create cap/extrusion meshes.
 - Hidden objects must not render faces, wireframe lines, or loose-edge lines and must be excluded from pointer picking.
 - Camera orbit uses `OrbitControls`; panning moves the current focus point and rotation stays around that focus.
 - The route composes the viewer as `<ModelViewer tools={defaultViewerTools} />`. Generic viewport responsibilities stay in `ModelViewer`: camera/renderer lifecycle, GLB load/restore, object selection, object visibility, object list, top bar, status, toasts, and shared mesh refresh operations. Feature surfaces are registered by `ViewerTool` ID.
@@ -56,7 +56,7 @@ Related documents:
 - Selecting a different mesh/object must use cached geometry data where possible. Plain object selection must not recolor all faces or rebuild loose-edge topology; face colors are refreshed only when clearing an active linked-face mask, and loose-edge rendering uses per-object cached line data.
 - Selected objects render a thin yellow `2px` screen-space silhouette outline around the outside contour, including closed meshes that have no open boundary edges. The viewer renders the normal scene first, then uses shared-geometry shader passes: a visible-surface stencil mask for selected objects, followed by a clip-space expanded outline pass that depth-tests behind selected model surfaces and is masked out over selected visible face areas.
 - Mesh/object selection and loop selection are mutually exclusive: selecting a mesh/object clears loop selection, and selecting a loop clears mesh/object selection. Shift-click does not select loops. While a loop is selected, the object list highlights the loop's parent object row as contextual focus without making it the active selected object.
-- Clicking a triangle, clicking background, or selecting an object row clears loose-edge loop selection.
+- Clicking a triangle, clicking background, or selecting an object row clears loose-edge contact-span selection.
 - The eye icon toggles object visibility.
 - Pressing `h` hides all selected objects.
 - Pressing `Option+H` or `Command+H` unhides all objects when the browser receives the event.
@@ -142,8 +142,12 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `refreshObjectWireframes`: rebuilds wireframes for all selectable meshes in a model.
 - `refreshSelectedObjectOutlineOverlay`: updates one mesh's selected-object stencil and outline shader visibility/uniforms.
 - `refreshSelectedObjectOutlines`: refreshes selected-object outlines for all selectable meshes in a model.
-- `getClosedLooseEdgeLoopKeys`: strips dangling/open loose-edge branches from one connected loose-edge component so only closed cycle segments become selectable loops.
-- `createLooseEdgeGeometry`: builds selected-object red line segments for edges connected to exactly one triangle and precomputes closed loose-edge loop caches, segment keys, topology-free pair keys, object IDs, and adjacent normals.
+- `getClosedLooseEdgeLoopKeys`: strips dangling/open loose-edge branches from one connected loose-edge component, using topology-free vertex-position continuity, so only closed cycle-core segments can become contact spans.
+- `getLooseEdgePositionEdgeKey`: creates the topology-free edge key used to detect contact across topology cuts.
+- `getLooseEdgeContactKey`: creates a stable contact ownership key from adjacent object IDs.
+- `getLooseEdgeContactSpanGroups`: splits one closed loose-edge cycle core into connected same-contact span segment groups, using topology-free vertex-position continuity.
+- `isLooseEdgeContactSpanClosed`: detects whether a contact span is itself a naturally closed loop by topology-free vertex-position degree.
+- `createLooseEdgeGeometry`: builds selected-object red line segments for edges connected to exactly one triangle and precomputes loose-edge contact-span caches, segment keys, topology-free pair keys, object IDs, contact ownership, and adjacent normals.
 - `createLooseEdgeRenderGeometryFromCache`: rebuilds selected-object loose-edge render geometry from per-object cached line data without rescanning mesh triangles or all cached loose-edge segments.
 - `refreshLooseEdgeOverlay`: rebuilds one mesh loose-edge overlay after visibility or geometry changes.
 - `refreshLooseEdgeOverlays`: rebuilds loose-edge overlays for all selectable meshes in a model.
@@ -152,9 +156,9 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `getTriangleNormal`: computes a triangle normal from three vertices.
 - `getTriangleEdgeKeys`: returns the three stable edge keys for a triangle.
 - `getTriangleEdgeFace`: returns edge direction and triangle normal for one edge.
-- `getLooseEdgeLoop`: returns a precomputed loose-edge loop by mesh and loop ID.
-- `isSameLooseEdgeLoop`: compares two loose-edge loop references by mesh, object ID, and loop ID.
-- `setLooseEdgeLoopColor`: recolors precomputed loose-edge loop segments in visible overlays and cached render colors without rebuilding geometry.
+- `getLooseEdgeLoop`: returns a precomputed loose-edge contact span by mesh and loop ID.
+- `isSameLooseEdgeLoop`: compares two loose-edge contact-span references by mesh, object ID, and loop ID.
+- `setLooseEdgeLoopColor`: recolors precomputed loose-edge contact-span segments in visible overlays and cached render colors without rebuilding geometry.
 - `getScreenPoint`: projects a world-space point into viewport pixel coordinates.
 - `getPointToSegmentDistance`: returns a screen-space point-to-segment distance in pixels.
 - `createHoverEdgeGeometry`: creates the line geometry for the hovered-edge overlay.
@@ -162,17 +166,18 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `setHoverEdgeOverlay`: updates and shows the hover-edge overlay.
 - `createLooseEdgeLoopOverlay`: creates the persistent selected-loop UI overlay from cached loop positions.
 - `getLoopFillPointKey`: creates the precision-rounded key used to de-duplicate loop fill vertices.
-- `getLooseEdgeLoopCacheKey`: creates the stable mesh/segment key for one grouped loose-edge loop.
-- `getLooseEdgeLoopMember`: creates the editable loop member wrapper for one cached loose-edge loop.
-- `getLinkedLooseEdgeLoopMembers`: resolves a loop to its exact two-object paired boundary members, falling back to the selected loop when the boundary is not exactly paired.
-- `getLooseEdgeLoopFillKey`: resolves the stable cap key for a selected loose-edge loop.
+- `getLooseEdgeLoopCacheKey`: creates the stable mesh/segment key for one grouped loose-edge contact span.
+- `getLooseEdgeLoopMember`: creates the editable member wrapper for one cached loose-edge contact span.
+- `getLinkedLooseEdgeLoopMembers`: resolves a contact span to its exact two-object paired boundary members, falling back to the selected span when the boundary is not exactly paired.
+- `getLooseEdgeLoopFillKey`: resolves the stable cap key for a selected loose-edge contact span.
 - `getLooseEdgeLoopDisplayColor`: resolves red/green loop display color from whether a stable loop cap state exists.
 - `getMeshObjectLocalCenter`: computes an object-local center used to orient generated cap faces outward.
 - `getMeshObjectProjectionSize`: computes an object's size along a normalized local extrusion axis.
 - `pushLoopFillTriangle`: appends a non-degenerate triangle with optional normal-based winding correction.
 - `createLoopFillGeometry`: creates a loop cap/extrusion buffer geometry from generated triangle vertices.
 - `getLoopTriangleOutwardNormal`: computes an object-center-relative normal target for side-wall winding.
-- `getLooseEdgeLoopFillData`: collects de-duplicated loop points, segment references, center, object center, and outward loop normal for cap/extrusion generation.
+- `appendForceClosingSegments`: pairs open contact-span endpoints and adds virtual fill segments so cap/extrusion/cylinder generation can operate on open spans without changing source topology.
+- `getLooseEdgeLoopFillData`: collects de-duplicated loop points, segment references, center, object center, and outward loop normal for contact-span cap/extrusion generation, adding virtual closing segments for open spans.
 - `getLooseEdgeLoopCapAxisData`: resolves the active cap axis, fill data, and default offset for one loop mode, including target-driven axis overrides for paired loops, the custom normal axis for `Ex. N`/`Cyl. N`, and a loop-sized fallback offset for degenerate projections.
 - `getLooseEdgeLoopCapOffsetBounds`: computes the allowed drag offset range for one cap axis.
 - `clampLooseEdgeLoopCapOffset`: clamps a requested cap offset before regenerating cap geometry.
@@ -182,7 +187,7 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `getLooseEdgeLoopCylinderRadius`: computes cylinder radius from the minimum loop-center-to-vertex distance.
 - `getPerpendicularBasis`: computes the local basis used to build cylinder rings around an axis.
 - `createLooseEdgeLoopCylinderGeometry`: creates the flat cap, 16 cylinder side faces, and cylinder top cap for cylinder loop modes.
-- `createLooseEdgeLoopFill`: creates an ephemeral non-selectable cap, extrusion, or cylinder mesh for a loose-edge loop, with outward-facing triangle winding.
+- `createLooseEdgeLoopFill`: creates an ephemeral non-selectable cap, extrusion, or cylinder mesh for a loose-edge contact span, with outward-facing triangle winding.
 - `updateHoverEdgeResolution`: updates fat-line material resolution for hover and linked-face overlays.
 - `buildMeshTopology`: builds triangle and edge adjacency for a mesh.
 - `getTopologyEdgeNormalAngle`: computes an edge normal angle from mesh topology and optional object filtering.
@@ -220,7 +225,7 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `applyViewerHistoryMeshStates`: restores mesh position, object ID, and topology ID state from one undo snapshot.
 - `applyPersistedMeshStates`: reapplies saved mesh edits after GLB parsing and styling.
 - `getRestoredObjectNames`: converts persisted string-keyed object names back to numeric object IDs.
-- `getLooseEdgeLoopFromPersistedState`: resolves a saved loop state against rebuilt loose-edge loops.
+- `getLooseEdgeLoopFromPersistedState`: resolves a saved loop state against rebuilt loose-edge contact spans.
 - `createLooseEdgeFromLoop`: creates a minimal loop reference used to regenerate persisted caps/extrusions/cylinders.
 - `getSafeExportName`: sanitizes object and file names for GLB export.
 - `getBlenderExportFileName`: derives the downloaded Blender GLB file name from the loaded source name.
@@ -251,22 +256,22 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `removeCapOffsetGizmo`: removes the selected-loop cap offset gizmo, hides the `Ex. N` transform gizmo, and ends any active cap-offset drag.
 - `clearLooseEdgeLoopCapStates`: removes all cap state and cap meshes, used when loading a new model.
 - `restoreLooseEdgeLoopCapStates`: restores persisted cap/extrusion/cylinder modes by resolving stable loop segment keys after loose-edge groups are rebuilt.
-- `refreshLooseEdgeLoopDisplayColors`: reapplies selected-object loose-edge loop red/green display colors from cap state and keeps the active selected loop yellow.
+- `refreshLooseEdgeLoopDisplayColors`: reapplies selected-object loose-edge contact-span red/green display colors from cap state and keeps the active selected span yellow.
 - `refreshLooseEdgeLoopCapVisibility`: updates generated cap/extrusion/cylinder mesh visibility from hidden object IDs and applies object/loop selection occlusion overlay render state.
-- `getLooseEdgeLoopMembers`: resolves the selected loose-edge loop to its editable paired members.
+- `getLooseEdgeLoopMembers`: resolves the selected loose-edge contact span to its editable paired members.
 - `getLooseEdgeLoopCapState`: reads the selected loop's cap state, falling back to a paired loop state when needed.
 - `getLoopWorldAxis`: converts a loop-local cap axis to world space.
 - `getMirroredLoopNormalTarget`: converts the selected loop's world-space cap axis into each paired loop's local target point.
 - `refreshCapOffsetGizmo`: creates, updates, or hides the selected-loop cap offset gizmo from the current cap state, using an arrow helper for fixed-axis extrusions and a three-axis translate gizmo for `Ex. N`; `Filled` mode has no gizmo.
 - `rebuildLooseEdgeLoopCapFill`: regenerates a cap/extrusion mesh after the mode or offset changes.
-- `syncLooseEdgeLoopCapStates`: reconciles per-loop cap state against the latest grouped loose-edge loops after topology changes.
+- `syncLooseEdgeLoopCapStates`: reconciles per-loop cap state against the latest grouped loose-edge contact spans after topology changes.
 - `getLooseEdgeLoopCapMode`: reads the selected loop's stored cap mode.
 - `setLooseEdgeLoopCapMode`: updates one loop or exact paired loop's cap/extrusion mode and lazily creates, replaces, or removes generated meshes for loop mode changes.
 - `setLooseEdgeLoopCapOffset`: updates one loop or exact paired loop's stored cap offset and regenerates generated meshes.
 - `setLooseEdgeLoopCapTarget`: updates one `Ex. N`/`Cyl. N` loop's stored normal-axis target, mirrors it to an exact paired loop when present, and regenerates generated meshes.
-- `clearSelectedLooseEdgeLoop`: clears the secondary loose-edge loop selection and selected-loop overlay while leaving cap meshes intact.
+- `clearSelectedLooseEdgeLoop`: clears the secondary loose-edge contact-span selection and selected-span overlay while leaving cap meshes intact.
 - `resetViewerStateForModelLoad`: clears runtime selection/progress/cap state before loading or restoring a model.
-- `selectLooseEdgeLoop`: selects a hovered loose-edge loop, shows it in yellow, and refreshes the active loop mode.
+- `selectLooseEdgeLoop`: selects a hovered loose-edge contact span, shows it in yellow, and refreshes the active loop mode.
 - `handleLooseEdgeLoopModeChange`: updates the selected loop's per-loop cap mode from the loop panel.
 - `rememberTriangleSelection`: stores the latest mesh-clicked triangle as the candidate origin for later separate-mode selection.
 - `getRememberedSelectedTriangle`: validates and returns the remembered origin only when it still belongs to the currently selected visible object.
@@ -329,7 +334,7 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `TopBar`: renders the hidden GLB file input, load button, undo button, export GLB button, and load/status text.
 - `ObjectsPanel`: renders object summaries, multi-selection highlighting, the selected-object join action, visibility toggles, and inline name editing.
 - `LinkedFaceSelectionPanel`: renders the separate-mode toggle, starting-point prompt, progress text, selection count, clickable threshold graph, and `Apply`/`Clear` actions.
-- `LoopPanel`: renders selected loose-edge loop controls as `Mode` (`None`, `Cap`, `Extrude`, `Cylinder`) and `Axis` (`X`, `Y`, `Z`, `Normal`) segments, with axis disabled for `None` and `Cap`.
+- `LoopPanel`: renders selected loose-edge contact-span controls as `Mode` (`None`, `Cap`, `Extrude`, `Cylinder`) and `Axis` (`X`, `Y`, `Z`, `Normal`) segments, with axis disabled for `None` and `Cap`.
 
 ### Control Component Helpers
 

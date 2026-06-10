@@ -67,6 +67,7 @@ const selectedLooseEdgeLoopColor = 0xfacc15;
 const capOffsetGizmoColor = 0x38bdf8;
 const capOffsetGizmoHeadScale = 0.055;
 const capOffsetGizmoHitTolerancePx = 10;
+const capOffsetGizmoForceClosedHitTolerancePx = 24;
 const capOffsetGizmoMinLength = 0.08;
 const looseEdgeLoopCylinderRadiusScale = 0.8;
 const looseEdgeLoopCylinderSegments = 16;
@@ -104,7 +105,10 @@ type HoveredEdge = {
   start: THREE.Vector3;
 };
 type LooseEdgeLoop = {
+  contactKey: string;
+  contactObjectIds: number[];
   id: number;
+  isClosed: boolean;
   objectId: number;
   pairKey: string;
   positions: Float32Array;
@@ -169,15 +173,20 @@ type CapOffsetDragState = {
   startOffset: number;
 };
 type LooseEdgeSegment = {
+  contactKey: string;
+  contactObjectIds: number[];
   end: THREE.Vector3;
   endKey: string;
+  endPositionKey: string;
   edgeKey: string;
   index: number;
   loopId: number;
   normal: THREE.Vector3;
   objectId: number;
+  positionEdgeKey: string;
   start: THREE.Vector3;
   startKey: string;
+  startPositionKey: string;
 };
 type LooseEdgeRenderCache = {
   colors: Float32Array;
@@ -192,6 +201,7 @@ type LooseEdgeLoopFillSegment = {
 };
 type LooseEdgeLoopFillData = {
   center: THREE.Vector3;
+  forceClosed: boolean;
   objectCenter: THREE.Vector3 | null;
   points: THREE.Vector3[];
   referenceNormal: THREE.Vector3;
@@ -1160,8 +1170,8 @@ function getClosedLooseEdgeLoopKeys(
       return;
     }
 
-    addVertexKey(segment.startKey, key);
-    addVertexKey(segment.endKey, key);
+    addVertexKey(segment.startPositionKey, key);
+    addVertexKey(segment.endPositionKey, key);
   });
 
   const pendingVertexKeys = Array.from(keysByVertexKey.entries())
@@ -1193,7 +1203,7 @@ function getClosedLooseEdgeLoopKeys(
       continue;
     }
 
-    [segment.startKey, segment.endKey].forEach((segmentVertexKey) => {
+    [segment.startPositionKey, segment.endPositionKey].forEach((segmentVertexKey) => {
       const segmentConnectedKeys = keysByVertexKey.get(segmentVertexKey);
 
       if (!segmentConnectedKeys) {
@@ -1211,6 +1221,126 @@ function getClosedLooseEdgeLoopKeys(
   return componentKeys.filter((key) => activeKeys.has(key));
 }
 
+function getLooseEdgePositionEdgeKey(start: THREE.Vector3, end: THREE.Vector3) {
+  return [getLoopFillPointKey(start), getLoopFillPointKey(end)].sort().join("|");
+}
+
+function getLooseEdgeContactKey(contactObjectIds: number[]) {
+  return contactObjectIds.length === 0 ? "outside" : `objects:${contactObjectIds.join(",")}`;
+}
+
+function getLooseEdgeContactSpanGroups(
+  segmentKeys: string[],
+  looseEdgeSegmentsByKey: Map<string, LooseEdgeSegment>,
+) {
+  const activeKeys = new Set(segmentKeys);
+  const keysByVertexKey = new Map<string, Set<string>>();
+  const visitedKeys = new Set<string>();
+  const groups: string[][] = [];
+
+  const addVertexKey = (vertexKey: string, key: string) => {
+    const keys = keysByVertexKey.get(vertexKey);
+
+    if (keys) {
+      keys.add(key);
+      return;
+    }
+
+    keysByVertexKey.set(vertexKey, new Set([key]));
+  };
+
+  segmentKeys.forEach((key) => {
+    const segment = looseEdgeSegmentsByKey.get(key);
+
+    if (!segment) {
+      return;
+    }
+
+    addVertexKey(segment.startPositionKey, key);
+    addVertexKey(segment.endPositionKey, key);
+  });
+
+  segmentKeys.forEach((seedKey) => {
+    if (visitedKeys.has(seedKey)) {
+      return;
+    }
+
+    const seedSegment = looseEdgeSegmentsByKey.get(seedKey);
+
+    if (!seedSegment) {
+      return;
+    }
+
+    const groupKeys: string[] = [];
+    const pendingKeys = [seedKey];
+
+    while (pendingKeys.length > 0) {
+      const key = pendingKeys.pop();
+
+      if (!key || visitedKeys.has(key) || !activeKeys.has(key)) {
+        continue;
+      }
+
+      const segment = looseEdgeSegmentsByKey.get(key);
+
+      if (!segment || segment.contactKey !== seedSegment.contactKey) {
+        continue;
+      }
+
+      visitedKeys.add(key);
+      groupKeys.push(key);
+
+      [segment.startPositionKey, segment.endPositionKey].forEach((vertexKey) => {
+        keysByVertexKey.get(vertexKey)?.forEach((connectedKey) => {
+          const connectedSegment = looseEdgeSegmentsByKey.get(connectedKey);
+
+          if (
+            connectedSegment &&
+            connectedSegment.contactKey === seedSegment.contactKey &&
+            !visitedKeys.has(connectedKey)
+          ) {
+            pendingKeys.push(connectedKey);
+          }
+        });
+      });
+    }
+
+    if (groupKeys.length > 0) {
+      groups.push(groupKeys);
+    }
+  });
+
+  return groups;
+}
+
+function isLooseEdgeContactSpanClosed(
+  segmentKeys: string[],
+  looseEdgeSegmentsByKey: Map<string, LooseEdgeSegment>,
+) {
+  if (segmentKeys.length < 3) {
+    return false;
+  }
+
+  const degreeByVertexKey = new Map<string, number>();
+
+  segmentKeys.forEach((key) => {
+    const segment = looseEdgeSegmentsByKey.get(key);
+
+    if (!segment) {
+      return;
+    }
+
+    [segment.startPositionKey, segment.endPositionKey].forEach((vertexKey) => {
+      degreeByVertexKey.set(vertexKey, (degreeByVertexKey.get(vertexKey) ?? 0) + 1);
+    });
+  });
+
+  return (
+    degreeByVertexKey.size >= 3 &&
+    Array.from(degreeByVertexKey.values()).every((degree) => degree === 2)
+  );
+}
+
 function createLooseEdgeGeometry(
   mesh: THREE.Mesh,
   hiddenObjectIds: Set<number>,
@@ -1225,11 +1355,14 @@ function createLooseEdgeGeometry(
       count: number;
       end: THREE.Vector3;
       endKey: string;
+      endPositionKey: string;
       edgeKey: string;
       normal: THREE.Vector3;
       objectId: number;
+      positionEdgeKey: string;
       start: THREE.Vector3;
       startKey: string;
+      startPositionKey: string;
     }
   >();
 
@@ -1268,6 +1401,9 @@ function createLooseEdgeGeometry(
       [vertices[2], vertices[0]],
     ].forEach(([start, end]) => {
       const edgeKey = [start.key, end.key].sort().join("|");
+      const startPositionKey = getLoopFillPointKey(start.point);
+      const endPositionKey = getLoopFillPointKey(end.point);
+      const positionEdgeKey = getLooseEdgePositionEdgeKey(start.point, end.point);
       const key = getLooseEdgeKey(objectId, edgeKey);
       const existing = edgeSegments.get(key);
 
@@ -1280,14 +1416,53 @@ function createLooseEdgeGeometry(
         count: 1,
         end: end.point,
         endKey: end.key,
+        endPositionKey,
         edgeKey,
         normal: normal.clone(),
         objectId,
+        positionEdgeKey,
         start: start.point,
         startKey: start.key,
+        startPositionKey,
       });
     });
   }
+
+  const looseEdgeRecordsByPositionEdgeKey = new Map<
+    string,
+    Array<{ key: string; objectId: number }>
+  >();
+
+  edgeSegments.forEach((edge, key) => {
+    if (edge.count !== 1) {
+      return;
+    }
+
+    const records = looseEdgeRecordsByPositionEdgeKey.get(edge.positionEdgeKey);
+
+    if (records) {
+      records.push({ key, objectId: edge.objectId });
+      return;
+    }
+
+    looseEdgeRecordsByPositionEdgeKey.set(edge.positionEdgeKey, [{ key, objectId: edge.objectId }]);
+  });
+
+  const contactObjectIdsByLooseEdgeKey = new Map<string, number[]>();
+
+  looseEdgeRecordsByPositionEdgeKey.forEach((records) => {
+    records.forEach((record) => {
+      const contactObjectIds = Array.from(
+        new Set(
+          records
+            .map((candidate) => candidate.objectId)
+            .filter((objectId) => objectId !== record.objectId),
+        ),
+      ).sort((first, second) => first - second);
+
+      contactObjectIdsByLooseEdgeKey.set(record.key, contactObjectIds);
+    });
+  });
 
   const segmentPositions: number[] = [];
   const segmentColors: number[] = [];
@@ -1318,21 +1493,28 @@ function createLooseEdgeGeometry(
       !hiddenObjectIds.has(selectedObjectId) &&
       edge.objectId === selectedObjectId;
     const segmentIndex = renderCacheSource.positions.length / 6;
+    const contactObjectIds = contactObjectIdsByLooseEdgeKey.get(key) ?? [];
+    const contactKey = getLooseEdgeContactKey(contactObjectIds);
 
     looseEdgeKeys.add(key);
     looseEdgeSegmentsByKey.set(key, {
+      contactKey,
+      contactObjectIds,
       end: edge.end,
       endKey: edge.endKey,
+      endPositionKey: edge.endPositionKey,
       edgeKey: edge.edgeKey,
       index: segmentIndex,
       loopId: -1,
       normal: edge.normal,
       objectId: edge.objectId,
+      positionEdgeKey: edge.positionEdgeKey,
       start: edge.start,
       startKey: edge.startKey,
+      startPositionKey: edge.startPositionKey,
     });
 
-    [edge.startKey, edge.endKey].forEach((vertexKey) => {
+    [edge.startPositionKey, edge.endPositionKey].forEach((vertexKey) => {
       const connectedKeys = looseEdgeKeysByVertexKey.get(vertexKey);
 
       if (connectedKeys) {
@@ -1402,7 +1584,7 @@ function createLooseEdgeGeometry(
       visitedLoopSegmentKeys.add(key);
       componentKeys.push(key);
 
-      [segment.startKey, segment.endKey].forEach((vertexKey) => {
+      [segment.startPositionKey, segment.endPositionKey].forEach((vertexKey) => {
         looseEdgeKeysByVertexKey.get(vertexKey)?.forEach((connectedKey) => {
           const connectedSegment = looseEdgeSegmentsByKey.get(connectedKey);
 
@@ -1423,49 +1605,62 @@ function createLooseEdgeGeometry(
       return;
     }
 
-    const loopId = nextLoopId;
-    const loopPositions: number[] = [];
-    const pairSegmentKeys: string[] = [];
-    const segmentIndexes: number[] = [];
-    const segmentKeys: string[] = [];
+    getLooseEdgeContactSpanGroups(loopSegmentKeys, looseEdgeSegmentsByKey).forEach(
+      (spanSegmentKeys) => {
+        const firstSegment = spanSegmentKeys
+          .map((key) => looseEdgeSegmentsByKey.get(key))
+          .find((segment): segment is LooseEdgeSegment => Boolean(segment));
 
-    nextLoopId += 1;
+        if (!firstSegment) {
+          return;
+        }
 
-    loopSegmentKeys.forEach((key) => {
-      const segment = looseEdgeSegmentsByKey.get(key);
+        const loopId = nextLoopId;
+        const loopPositions: number[] = [];
+        const pairSegmentKeys: string[] = [];
+        const segmentIndexes: number[] = [];
+        const segmentKeys: string[] = [];
 
-      if (!segment) {
-        return;
-      }
+        nextLoopId += 1;
 
-      segment.loopId = loopId;
-      segmentKeys.push(key);
-      pairSegmentKeys.push(
-        [getLoopFillPointKey(segment.start), getLoopFillPointKey(segment.end)].sort().join("|"),
-      );
+        spanSegmentKeys.forEach((key) => {
+          const segment = looseEdgeSegmentsByKey.get(key);
 
-      if (segment.index >= 0) {
-        segmentIndexes.push(segment.index);
-      }
+          if (!segment) {
+            return;
+          }
 
-      loopPositions.push(
-        segment.start.x,
-        segment.start.y,
-        segment.start.z,
-        segment.end.x,
-        segment.end.y,
-        segment.end.z,
-      );
-    });
+          segment.loopId = loopId;
+          segmentKeys.push(key);
+          pairSegmentKeys.push(segment.positionEdgeKey);
 
-    looseEdgeLoopById.set(loopId, {
-      id: loopId,
-      objectId: seedSegment.objectId,
-      pairKey: pairSegmentKeys.sort().join("~"),
-      positions: new Float32Array(loopPositions),
-      segmentIndexes,
-      segmentKeys,
-    });
+          if (segment.index >= 0) {
+            segmentIndexes.push(segment.index);
+          }
+
+          loopPositions.push(
+            segment.start.x,
+            segment.start.y,
+            segment.start.z,
+            segment.end.x,
+            segment.end.y,
+            segment.end.z,
+          );
+        });
+
+        looseEdgeLoopById.set(loopId, {
+          contactKey: firstSegment.contactKey,
+          contactObjectIds: [...firstSegment.contactObjectIds],
+          id: loopId,
+          isClosed: isLooseEdgeContactSpanClosed(segmentKeys, looseEdgeSegmentsByKey),
+          objectId: firstSegment.objectId,
+          pairKey: pairSegmentKeys.sort().join("~"),
+          positions: new Float32Array(loopPositions),
+          segmentIndexes,
+          segmentKeys,
+        });
+      },
+    );
   });
 
   geometry.setPositions(segmentPositions);
@@ -2057,6 +2252,59 @@ function getLoopTriangleOutwardNormal(
     .sub(objectCenter);
 }
 
+function appendForceClosingSegments(points: THREE.Vector3[], segments: LooseEdgeLoopFillSegment[]) {
+  const degreeByPointIndex = new Map<number, number>();
+
+  segments.forEach((segment) => {
+    degreeByPointIndex.set(
+      segment.startIndex,
+      (degreeByPointIndex.get(segment.startIndex) ?? 0) + 1,
+    );
+    degreeByPointIndex.set(segment.endIndex, (degreeByPointIndex.get(segment.endIndex) ?? 0) + 1);
+  });
+
+  const openPointIndexes = points
+    .map((_point, index) => index)
+    .filter((index) => (degreeByPointIndex.get(index) ?? 0) % 2 === 1);
+  let forceClosed = false;
+
+  while (openPointIndexes.length >= 2) {
+    const startIndex = openPointIndexes.shift();
+
+    if (startIndex == null) {
+      break;
+    }
+
+    let nearestIndex = -1;
+    let nearestDistance = Infinity;
+
+    openPointIndexes.forEach((candidateIndex, listIndex) => {
+      const distance = points[startIndex].distanceToSquared(points[candidateIndex]);
+
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = listIndex;
+      }
+    });
+
+    const endIndex = nearestIndex >= 0 ? openPointIndexes.splice(nearestIndex, 1)[0] : undefined;
+
+    if (endIndex == null || nearestDistance <= 0.000000000001) {
+      continue;
+    }
+
+    segments.push({
+      end: points[endIndex].clone(),
+      endIndex,
+      start: points[startIndex].clone(),
+      startIndex,
+    });
+    forceClosed = true;
+  }
+
+  return forceClosed;
+}
+
 function getLooseEdgeLoopFillData(edge: HoveredEdge): LooseEdgeLoopFillData | null {
   const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
   const segmentsByKey = edge.mesh.userData.looseEdgeSegmentsByKey as
@@ -2111,6 +2359,8 @@ function getLooseEdgeLoopFillData(edge: HoveredEdge): LooseEdgeLoopFillData | nu
     });
   }
 
+  const forceClosed = loop.isClosed ? false : appendForceClosingSegments(points, segments);
+
   if (points.length < 3 || segments.length === 0) {
     return null;
   }
@@ -2164,6 +2414,7 @@ function getLooseEdgeLoopFillData(edge: HoveredEdge): LooseEdgeLoopFillData | nu
 
   return {
     center,
+    forceClosed,
     objectCenter,
     points,
     referenceNormal,
@@ -4789,6 +5040,11 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     arrow.setDirection(arrowDirection);
     arrow.setLength(visualLength, headLength, headWidth);
     arrow.setColor(capOffsetGizmoColor);
+    gizmo.userData.hitStartLocal = axisData.data.center.clone();
+    gizmo.userData.hitEndLocal = axisData.data.center
+      .clone()
+      .addScaledVector(arrowDirection, visualLength);
+    gizmo.userData.hitVisualLength = visualLength;
   };
 
   const rebuildLooseEdgeLoopCapFill = (
@@ -6583,9 +6839,10 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       }
 
       const handle = capOffsetGizmoHandleRef.current;
+      const gizmo = capOffsetGizmoRef.current;
       const edge = selectedLooseEdgeLoopRef.current;
 
-      if (!handle || !edge || !handle.visible) {
+      if (!handle || !gizmo || !edge || !handle.visible || !gizmo.visible) {
         return null;
       }
 
@@ -6601,6 +6858,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       const rect = renderer.domElement.getBoundingClientRect();
 
       edge.mesh.updateMatrixWorld(true);
+      gizmo.updateMatrixWorld(true);
 
       const targetOffset = axisData.axis.clone().multiplyScalar(state.offset);
       const arrowDirection =
@@ -6614,23 +6872,32 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         loopSpan * 0.12,
         capOffsetGizmoMinLength,
       );
-      const startScreen = getScreenPoint(
-        edge.mesh.localToWorld(axisData.data.center.clone()),
-        camera,
-        rect,
-      );
-      const endScreen = getScreenPoint(
-        edge.mesh.localToWorld(
-          axisData.data.center.clone().addScaledVector(arrowDirection, visualLength),
-        ),
-        camera,
-        rect,
-      );
+      const hitStartLocal =
+        gizmo.userData.hitStartLocal instanceof THREE.Vector3
+          ? (gizmo.userData.hitStartLocal as THREE.Vector3)
+          : axisData.data.center;
+      const hitEndLocal =
+        gizmo.userData.hitEndLocal instanceof THREE.Vector3
+          ? (gizmo.userData.hitEndLocal as THREE.Vector3)
+          : axisData.data.center.clone().addScaledVector(arrowDirection, visualLength);
+      const hitVisualLength =
+        typeof gizmo.userData.hitVisualLength === "number"
+          ? (gizmo.userData.hitVisualLength as number)
+          : visualLength;
+      const hitStartWorld = gizmo.localToWorld(hitStartLocal.clone());
+      const hitEndWorld = gizmo.localToWorld(hitEndLocal.clone());
+      const startScreen = getScreenPoint(hitStartWorld, camera, rect);
+      const endScreen = getScreenPoint(hitEndWorld, camera, rect);
 
       if (!startScreen || !endScreen) {
         return null;
       }
 
+      const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
+      const hitTolerance =
+        axisData.data.forceClosed || loop?.isClosed === false
+          ? capOffsetGizmoForceClosedHitTolerancePx
+          : capOffsetGizmoHitTolerancePx;
       const hitDistance = getPointToSegmentDistance(
         event.clientX,
         event.clientY,
@@ -6640,7 +6907,10 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         endScreen.y,
       );
 
-      if (hitDistance > capOffsetGizmoHitTolerancePx) {
+      if (
+        hitDistance > hitTolerance &&
+        Math.hypot(event.clientX - endScreen.x, event.clientY - endScreen.y) > hitTolerance
+      ) {
         return null;
       }
 
@@ -6648,7 +6918,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       let pixelsPerOffsetUnit = 80;
 
       screenAxis.set(endScreen.x - startScreen.x, endScreen.y - startScreen.y);
-      pixelsPerOffsetUnit = screenAxis.length() / visualLength;
+      pixelsPerOffsetUnit = screenAxis.length() / hitVisualLength;
 
       if (pixelsPerOffsetUnit >= 4) {
         screenAxis.normalize();
@@ -6695,6 +6965,30 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       return true;
     };
 
+    const startCapOffsetDrag = (event: PointerEvent, drag: CapOffsetDragState) => {
+      capOffsetDragRef.current = drag;
+      pointerStart = null;
+      controls.enabled = false;
+      clearHoveredEdge();
+      renderer.domElement.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    };
+
+    const handleCapOffsetPointerDownCapture = (event: PointerEvent) => {
+      if (event.button !== 0 || isCapNormalTransformActive()) {
+        return;
+      }
+
+      const capOffsetDrag = getCapOffsetDragAtPointer(event);
+
+      if (!capOffsetDrag) {
+        return;
+      }
+
+      startCapOffsetDrag(event, capOffsetDrag);
+      event.stopImmediatePropagation();
+    };
+
     const handlePointerDown = (event: PointerEvent) => {
       if (event.button !== 0) {
         return;
@@ -6709,12 +7003,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       const capOffsetDrag = getCapOffsetDragAtPointer(event);
 
       if (capOffsetDrag) {
-        capOffsetDragRef.current = capOffsetDrag;
-        pointerStart = null;
-        controls.enabled = false;
-        clearHoveredEdge();
-        renderer.domElement.setPointerCapture(event.pointerId);
-        event.preventDefault();
+        startCapOffsetDrag(event, capOffsetDrag);
         return;
       }
 
@@ -6891,6 +7180,9 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       hideSelectedObjectHandlerRef.current?.();
     };
 
+    renderer.domElement.addEventListener("pointerdown", handleCapOffsetPointerDownCapture, {
+      capture: true,
+    });
     renderer.domElement.addEventListener("pointerdown", handlePointerDown);
     renderer.domElement.addEventListener("pointermove", handlePointerMove);
     renderer.domElement.addEventListener("pointerleave", handlePointerLeave);
@@ -6944,6 +7236,9 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       }
       window.cancelAnimationFrame(animationFrame);
       window.removeEventListener("resize", handleResize);
+      renderer.domElement.removeEventListener("pointerdown", handleCapOffsetPointerDownCapture, {
+        capture: true,
+      });
       renderer.domElement.removeEventListener("pointerdown", handlePointerDown);
       renderer.domElement.removeEventListener("pointermove", handlePointerMove);
       renderer.domElement.removeEventListener("pointerleave", handlePointerLeave);
