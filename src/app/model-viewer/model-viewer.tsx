@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
@@ -47,12 +48,15 @@ const hoverEdgeLineWidth = 2;
 const hoverEdgeRenderOrder = 3;
 const selectedObjectOutlineColor = 0xfacc15;
 const selectedObjectOutlinePixels = 2;
+const maxSelectedObjectOutlineIds = 64;
 const selectedObjectStencilRenderOrder = 3.9;
 const selectedObjectOutlineRenderOrder = 4;
 const looseEdgeColor = 0xef4444;
-const looseEdgeHoverColor = 0x2563eb;
+const cappedLooseEdgeColor = 0x22c55e;
+const looseEdgeHoverColor = 0xfacc15;
 const looseEdgeLineWidth = 3;
 const looseEdgeUiOverlayLineWidth = 4;
+const looseEdgeHoverOverlayLineWidth = 6;
 const looseEdgeHoverHitTolerancePx = 5;
 const looseEdgeHoverRenderOrder = 8;
 const obstructedLooseEdgeLineWidth = 1;
@@ -102,6 +106,7 @@ type HoveredEdge = {
 type LooseEdgeLoop = {
   id: number;
   objectId: number;
+  pairKey: string;
   positions: Float32Array;
   segmentIndexes: number[];
   segmentKeys: string[];
@@ -120,8 +125,42 @@ type LooseEdgeLoopCapAxisData = {
   data: LooseEdgeLoopFillData;
   defaultOffset: number;
 };
+type ExportGeometryGroup = {
+  materialName: string;
+  positions: number[];
+};
+type ExportObjectGeometry = {
+  basePositions: number[];
+  generatedGroups: ExportGeometryGroup[];
+};
+type ViewerHistoryMeshState = {
+  hasPositionEdits: boolean;
+  meshIndex: number;
+  positions: Float32Array;
+  triangleObjectIds: Uint32Array;
+  vertexTopologyIds: Uint32Array;
+};
+type ViewerHistorySnapshot = {
+  hiddenObjectIds: number[];
+  loopCapStates: PersistedLoopCapState[];
+  meshes: ViewerHistoryMeshState[];
+  nextObjectId: number;
+  objectNames: ObjectNameMap;
+};
+type ObjectJoinPlan = {
+  objectIdToTargetId: Map<number, number>;
+  targetObjectIds: Set<number>;
+};
+type LooseEdgeLoopMember = {
+  edge: HoveredEdge;
+  key: string;
+  loop: LooseEdgeLoop;
+  mesh: THREE.Mesh;
+};
 type CapOffsetDragState = {
   edge: HoveredEdge;
+  historySnapshot: ViewerHistorySnapshot | null;
+  offsetDirection: number;
   pixelsPerOffsetUnit?: number;
   pointerId: number;
   screenAxis?: THREE.Vector2;
@@ -362,14 +401,18 @@ function clearModel(root: THREE.Group) {
   });
 }
 
-function getVertexKey(position: THREE.BufferAttribute, index: number) {
+function getVertexPositionKey(position: THREE.BufferAttribute, index: number) {
   const precision = 100000;
-  const topologyId = vertexTopologyIdsByPosition.get(position)?.[index] ?? 0;
-  const positionKey = [
+  return [
     Math.round(position.getX(index) * precision),
     Math.round(position.getY(index) * precision),
     Math.round(position.getZ(index) * precision),
   ].join(",");
+}
+
+function getVertexKey(position: THREE.BufferAttribute, index: number) {
+  const topologyId = vertexTopologyIdsByPosition.get(position)?.[index] ?? 0;
+  const positionKey = getVertexPositionKey(position, index);
 
   return topologyId > 0 ? `${positionKey}#${topologyId}` : positionKey;
 }
@@ -569,63 +612,6 @@ function collectSeparatedObjects(
     }));
 }
 
-function getTriangleEdges(position: THREE.BufferAttribute) {
-  const pointA = new THREE.Vector3();
-  const pointB = new THREE.Vector3();
-  const pointC = new THREE.Vector3();
-  const edgeA = new THREE.Vector3();
-  const edgeB = new THREE.Vector3();
-  const edgeFaces = new Map<string, TriangleEdgeFace[]>();
-  const triangleEdgeKeys: string[][] = [];
-
-  for (let index = 0; index < position.count; index += 3) {
-    pointA.fromBufferAttribute(position, index);
-    pointB.fromBufferAttribute(position, index + 1);
-    pointC.fromBufferAttribute(position, index + 2);
-
-    const normal = edgeA
-      .subVectors(pointB, pointA)
-      .cross(edgeB.subVectors(pointC, pointA))
-      .normalize()
-      .clone();
-    const triangle = [
-      { point: pointA.clone(), vertexKey: getVertexKey(position, index) },
-      {
-        point: pointB.clone(),
-        vertexKey: getVertexKey(position, index + 1),
-      },
-      {
-        point: pointC.clone(),
-        vertexKey: getVertexKey(position, index + 2),
-      },
-    ];
-    const edgeKeys = [
-      [triangle[0], triangle[1]],
-      [triangle[1], triangle[2]],
-      [triangle[2], triangle[0]],
-    ].map(([start, end]) => {
-      const key = [start.vertexKey, end.vertexKey].sort().join("|");
-      const edgeFace = {
-        direction: end.point.clone().sub(start.point).normalize(),
-        normal,
-      };
-      const existing = edgeFaces.get(key);
-
-      if (existing) {
-        existing.push(edgeFace);
-      } else {
-        edgeFaces.set(key, [edgeFace]);
-      }
-
-      return key;
-    });
-
-    triangleEdgeKeys.push(edgeKeys);
-  }
-
-  return { edgeFaces, triangleEdgeKeys };
-}
-
 function getSignedEdgeNormalAngle(edgeFaces: TriangleEdgeFace[]) {
   if (edgeFaces.length <= 1) {
     return 90;
@@ -677,8 +663,12 @@ function createFaceMaterial(visible = true) {
 
 function createSelectedObjectStencilMaterial() {
   const material = new THREE.ShaderMaterial({
+    defines: {
+      MAX_SELECTED_OBJECT_IDS: maxSelectedObjectOutlineIds,
+    },
     uniforms: {
-      selectedObjectId: { value: -1 },
+      selectedObjectIdCount: { value: 0 },
+      selectedObjectIds: { value: new Array(maxSelectedObjectOutlineIds).fill(-1) },
     },
     vertexShader: `
       attribute float objectId;
@@ -690,11 +680,26 @@ function createSelectedObjectStencilMaterial() {
       }
     `,
     fragmentShader: `
-      uniform float selectedObjectId;
+      uniform int selectedObjectIdCount;
+      uniform float selectedObjectIds[MAX_SELECTED_OBJECT_IDS];
       varying float vObjectId;
 
+      bool isSelectedObjectId(float objectId) {
+        for (int index = 0; index < MAX_SELECTED_OBJECT_IDS; index += 1) {
+          if (index >= selectedObjectIdCount) {
+            break;
+          }
+
+          if (abs(objectId - selectedObjectIds[index]) <= 0.5) {
+            return true;
+          }
+        }
+
+        return false;
+      }
+
       void main() {
-        if (abs(vObjectId - selectedObjectId) > 0.5) {
+        if (!isSelectedObjectId(vObjectId)) {
           discard;
         }
 
@@ -719,11 +724,15 @@ function createSelectedObjectStencilMaterial() {
 
 function createSelectedObjectOutlineMaterial() {
   const material = new THREE.ShaderMaterial({
+    defines: {
+      MAX_SELECTED_OBJECT_IDS: maxSelectedObjectOutlineIds,
+    },
     uniforms: {
       outlineColor: { value: new THREE.Color(selectedObjectOutlineColor) },
       outlinePixels: { value: selectedObjectOutlinePixels },
       resolution: { value: new THREE.Vector2(1, 1) },
-      selectedObjectId: { value: -1 },
+      selectedObjectIdCount: { value: 0 },
+      selectedObjectIds: { value: new Array(maxSelectedObjectOutlineIds).fill(-1) },
     },
     vertexShader: `
       attribute float objectId;
@@ -756,11 +765,26 @@ function createSelectedObjectOutlineMaterial() {
     `,
     fragmentShader: `
       uniform vec3 outlineColor;
-      uniform float selectedObjectId;
+      uniform int selectedObjectIdCount;
+      uniform float selectedObjectIds[MAX_SELECTED_OBJECT_IDS];
       varying float vObjectId;
 
+      bool isSelectedObjectId(float objectId) {
+        for (int index = 0; index < MAX_SELECTED_OBJECT_IDS; index += 1) {
+          if (index >= selectedObjectIdCount) {
+            break;
+          }
+
+          if (abs(objectId - selectedObjectIds[index]) <= 0.5) {
+            return true;
+          }
+        }
+
+        return false;
+      }
+
       void main() {
-        if (abs(vObjectId - selectedObjectId) > 0.5) {
+        if (!isSelectedObjectId(vObjectId)) {
           discard;
         }
 
@@ -955,7 +979,7 @@ function styleModel(model: THREE.Object3D) {
     selectedObjectOutline.userData.isSelectedObjectOutlineOverlay = true;
     selectedObjectOutline.visible = false;
     mesh.userData.selectedObjectOutlineOverlay = selectedObjectOutline;
-    refreshSelectedObjectOutlineOverlay(mesh, new Set<number>(), null);
+    refreshSelectedObjectOutlineOverlay(mesh, new Set<number>(), new Set<number>());
 
     const hoverEdge = new LineSegments2(
       new LineSegmentsGeometry(),
@@ -1070,15 +1094,15 @@ function refreshObjectWireframes(model: THREE.Object3D, hiddenObjectIds: Set<num
 function refreshSelectedObjectOutlineOverlay(
   mesh: THREE.Mesh,
   hiddenObjectIds: Set<number>,
-  selectedObjectId: number | null,
+  selectedObjectIds: Set<number>,
 ) {
   const stencil = mesh.userData.selectedObjectStencilOverlay as THREE.Mesh | undefined;
   const outline = mesh.userData.selectedObjectOutlineOverlay as THREE.Mesh | undefined;
   const objectIdSet = getTriangleObjectIdSet(mesh);
-  const isVisible =
-    selectedObjectId != null &&
-    !hiddenObjectIds.has(selectedObjectId) &&
-    objectIdSet.has(selectedObjectId);
+  const visibleSelectedObjectIds = Array.from(selectedObjectIds)
+    .filter((objectId) => !hiddenObjectIds.has(objectId) && objectIdSet.has(objectId))
+    .slice(0, maxSelectedObjectOutlineIds);
+  const isVisible = visibleSelectedObjectIds.length > 0;
 
   [stencil, outline].forEach((overlay) => {
     if (!overlay) {
@@ -1088,7 +1112,13 @@ function refreshSelectedObjectOutlineOverlay(
     overlay.visible = isVisible;
 
     if (overlay.material instanceof THREE.ShaderMaterial) {
-      overlay.material.uniforms.selectedObjectId.value = selectedObjectId ?? -1;
+      const uniformIds = overlay.material.uniforms.selectedObjectIds.value as number[];
+
+      for (let index = 0; index < maxSelectedObjectOutlineIds; index += 1) {
+        uniformIds[index] = visibleSelectedObjectIds[index] ?? -1;
+      }
+
+      overlay.material.uniforms.selectedObjectIdCount.value = visibleSelectedObjectIds.length;
     }
   });
 }
@@ -1096,13 +1126,89 @@ function refreshSelectedObjectOutlineOverlay(
 function refreshSelectedObjectOutlines(
   model: THREE.Object3D,
   hiddenObjectIds: Set<number>,
-  selectedObjectId: number | null,
+  selectedObjectIds: Set<number>,
 ) {
   model.traverse((child) => {
     if (isSelectableMesh(child)) {
-      refreshSelectedObjectOutlineOverlay(child, hiddenObjectIds, selectedObjectId);
+      refreshSelectedObjectOutlineOverlay(child, hiddenObjectIds, selectedObjectIds);
     }
   });
+}
+
+function getClosedLooseEdgeLoopKeys(
+  componentKeys: string[],
+  looseEdgeSegmentsByKey: Map<string, LooseEdgeSegment>,
+) {
+  const activeKeys = new Set(componentKeys);
+  const keysByVertexKey = new Map<string, Set<string>>();
+
+  const addVertexKey = (vertexKey: string, key: string) => {
+    const keys = keysByVertexKey.get(vertexKey);
+
+    if (keys) {
+      keys.add(key);
+      return;
+    }
+
+    keysByVertexKey.set(vertexKey, new Set([key]));
+  };
+
+  componentKeys.forEach((key) => {
+    const segment = looseEdgeSegmentsByKey.get(key);
+
+    if (!segment) {
+      return;
+    }
+
+    addVertexKey(segment.startKey, key);
+    addVertexKey(segment.endKey, key);
+  });
+
+  const pendingVertexKeys = Array.from(keysByVertexKey.entries())
+    .filter(([, keys]) => keys.size <= 1)
+    .map(([vertexKey]) => vertexKey);
+
+  while (pendingVertexKeys.length > 0) {
+    const vertexKey = pendingVertexKeys.pop();
+
+    if (!vertexKey) {
+      continue;
+    }
+
+    const connectedKeys = keysByVertexKey.get(vertexKey);
+
+    if (!connectedKeys || connectedKeys.size > 1) {
+      continue;
+    }
+
+    const key = connectedKeys.values().next().value;
+
+    if (!key || !activeKeys.delete(key)) {
+      continue;
+    }
+
+    const segment = looseEdgeSegmentsByKey.get(key);
+
+    if (!segment) {
+      continue;
+    }
+
+    [segment.startKey, segment.endKey].forEach((segmentVertexKey) => {
+      const segmentConnectedKeys = keysByVertexKey.get(segmentVertexKey);
+
+      if (!segmentConnectedKeys) {
+        return;
+      }
+
+      segmentConnectedKeys.delete(key);
+
+      if (segmentConnectedKeys.size <= 1) {
+        pendingVertexKeys.push(segmentVertexKey);
+      }
+    });
+  }
+
+  return componentKeys.filter((key) => activeKeys.has(key));
 }
 
 function createLooseEdgeGeometry(
@@ -1200,11 +1306,18 @@ function createLooseEdgeGeometry(
       return;
     }
 
+    let renderCacheSource = looseEdgeRenderCacheSourceByObjectId.get(edge.objectId);
+
+    if (!renderCacheSource) {
+      renderCacheSource = { colors: [], positions: [] };
+      looseEdgeRenderCacheSourceByObjectId.set(edge.objectId, renderCacheSource);
+    }
+
     const shouldRenderSegment =
       selectedObjectId != null &&
       !hiddenObjectIds.has(selectedObjectId) &&
       edge.objectId === selectedObjectId;
-    const segmentIndex = shouldRenderSegment ? segmentPositions.length / 6 : -1;
+    const segmentIndex = renderCacheSource.positions.length / 6;
 
     looseEdgeKeys.add(key);
     looseEdgeSegmentsByKey.set(key, {
@@ -1228,13 +1341,6 @@ function createLooseEdgeGeometry(
         looseEdgeKeysByVertexKey.set(vertexKey, new Set([key]));
       }
     });
-
-    let renderCacheSource = looseEdgeRenderCacheSourceByObjectId.get(edge.objectId);
-
-    if (!renderCacheSource) {
-      renderCacheSource = { colors: [], positions: [] };
-      looseEdgeRenderCacheSourceByObjectId.set(edge.objectId, renderCacheSource);
-    }
 
     renderCacheSource.positions.push(
       edge.start.x,
@@ -1270,38 +1376,78 @@ function createLooseEdgeGeometry(
   });
 
   let nextLoopId = 0;
+  const visitedLoopSegmentKeys = new Set<string>();
 
   looseEdgeSegmentsByKey.forEach((seedSegment, seedKey) => {
-    if (seedSegment.loopId >= 0) {
+    if (visitedLoopSegmentKeys.has(seedKey)) {
       return;
     }
 
-    const loopId = nextLoopId;
-    const loopPositions: number[] = [];
+    const componentKeys: string[] = [];
     const pendingKeys = [seedKey];
-    const segmentIndexes: number[] = [];
-    const segmentKeys: string[] = [];
-
-    nextLoopId += 1;
 
     while (pendingKeys.length > 0) {
       const key = pendingKeys.pop();
 
-      if (!key) {
+      if (!key || visitedLoopSegmentKeys.has(key)) {
         continue;
       }
 
       const segment = looseEdgeSegmentsByKey.get(key);
 
-      if (!segment || segment.loopId >= 0) {
+      if (!segment) {
         continue;
+      }
+
+      visitedLoopSegmentKeys.add(key);
+      componentKeys.push(key);
+
+      [segment.startKey, segment.endKey].forEach((vertexKey) => {
+        looseEdgeKeysByVertexKey.get(vertexKey)?.forEach((connectedKey) => {
+          const connectedSegment = looseEdgeSegmentsByKey.get(connectedKey);
+
+          if (
+            connectedSegment &&
+            connectedSegment.objectId === seedSegment.objectId &&
+            !visitedLoopSegmentKeys.has(connectedKey)
+          ) {
+            pendingKeys.push(connectedKey);
+          }
+        });
+      });
+    }
+
+    const loopSegmentKeys = getClosedLooseEdgeLoopKeys(componentKeys, looseEdgeSegmentsByKey);
+
+    if (loopSegmentKeys.length === 0) {
+      return;
+    }
+
+    const loopId = nextLoopId;
+    const loopPositions: number[] = [];
+    const pairSegmentKeys: string[] = [];
+    const segmentIndexes: number[] = [];
+    const segmentKeys: string[] = [];
+
+    nextLoopId += 1;
+
+    loopSegmentKeys.forEach((key) => {
+      const segment = looseEdgeSegmentsByKey.get(key);
+
+      if (!segment) {
+        return;
       }
 
       segment.loopId = loopId;
       segmentKeys.push(key);
+      pairSegmentKeys.push(
+        [getLoopFillPointKey(segment.start), getLoopFillPointKey(segment.end)].sort().join("|"),
+      );
+
       if (segment.index >= 0) {
         segmentIndexes.push(segment.index);
       }
+
       loopPositions.push(
         segment.start.x,
         segment.start.y,
@@ -1310,21 +1456,12 @@ function createLooseEdgeGeometry(
         segment.end.y,
         segment.end.z,
       );
-
-      [segment.startKey, segment.endKey].forEach((vertexKey) => {
-        looseEdgeKeysByVertexKey.get(vertexKey)?.forEach((connectedKey) => {
-          const connectedSegment = looseEdgeSegmentsByKey.get(connectedKey);
-
-          if (connectedSegment && connectedSegment.loopId < 0) {
-            pendingKeys.push(connectedKey);
-          }
-        });
-      });
-    }
+    });
 
     looseEdgeLoopById.set(loopId, {
       id: loopId,
       objectId: seedSegment.objectId,
+      pairKey: pairSegmentKeys.sort().join("~"),
       positions: new Float32Array(loopPositions),
       segmentIndexes,
       segmentKeys,
@@ -1453,30 +1590,6 @@ function getTriangleNormal(vertices: TriangleVertex[]) {
     .cross(new THREE.Vector3().subVectors(vertices[2].point, vertices[0].point));
 }
 
-function orientTriangle(vertices: TriangleVertex[], referenceNormal: THREE.Vector3) {
-  const normal = getTriangleNormal(vertices);
-
-  if (normal.lengthSq() === 0 || referenceNormal.lengthSq() === 0) {
-    return vertices;
-  }
-
-  if (normal.dot(referenceNormal) >= 0) {
-    return vertices;
-  }
-
-  return [vertices[0], vertices[2], vertices[1]];
-}
-
-function setTrianglePositions(
-  position: THREE.BufferAttribute,
-  startIndex: number,
-  vertices: TriangleVertex[],
-) {
-  vertices.forEach((vertex, offset) => {
-    position.setXYZ(startIndex + offset, vertex.point.x, vertex.point.y, vertex.point.z);
-  });
-}
-
 function getTriangleEdgeKeys(vertices: TriangleVertex[]) {
   return [
     [0, 1],
@@ -1543,10 +1656,31 @@ function setLooseEdgeLoopColor(mesh: THREE.Mesh, loopId: number | undefined, col
   }
 
   const color = new THREE.Color(colorValue);
+  const renderCacheByObjectId = mesh.userData.looseEdgeRenderCacheByObjectId as
+    | Map<number, LooseEdgeRenderCache>
+    | undefined;
+  const renderCache = renderCacheByObjectId?.get(loop.objectId);
   const overlays = [
     mesh.userData.obstructedLooseEdgeOverlay as LineSegments2 | undefined,
     mesh.userData.looseEdgeOverlay as LineSegments2 | undefined,
   ];
+
+  if (renderCache) {
+    loop.segmentIndexes.forEach((segmentIndex) => {
+      if (segmentIndex < 0 || segmentIndex >= renderCache.segmentCount) {
+        return;
+      }
+
+      const colorIndex = segmentIndex * 6;
+
+      renderCache.colors[colorIndex] = color.r;
+      renderCache.colors[colorIndex + 1] = color.g;
+      renderCache.colors[colorIndex + 2] = color.b;
+      renderCache.colors[colorIndex + 3] = color.r;
+      renderCache.colors[colorIndex + 4] = color.g;
+      renderCache.colors[colorIndex + 5] = color.b;
+    });
+  }
 
   overlays.forEach((overlay) => {
     if (!overlay) {
@@ -1561,6 +1695,10 @@ function setLooseEdgeLoopColor(mesh: THREE.Mesh, loopId: number | undefined, col
     }
 
     loop.segmentIndexes.forEach((segmentIndex) => {
+      if (segmentIndex < 0 || segmentIndex >= startColor.count || segmentIndex >= endColor.count) {
+        return;
+      }
+
       startColor.setXYZ(segmentIndex, color.r, color.g, color.b);
       endColor.setXYZ(segmentIndex, color.r, color.g, color.b);
     });
@@ -1668,7 +1806,9 @@ function setHoverEdgeOverlay(edge: HoveredEdge) {
   if (hoverEdge.material instanceof LineMaterial) {
     hoverEdge.material.depthTest = false;
     hoverEdge.material.color.setHex(isLoopHover ? looseEdgeHoverColor : hoverEdgeColor);
-    hoverEdge.material.linewidth = isLoopHover ? looseEdgeUiOverlayLineWidth : hoverEdgeLineWidth;
+    hoverEdge.material.linewidth = isLoopHover
+      ? looseEdgeHoverOverlayLineWidth
+      : hoverEdgeLineWidth;
   }
 
   hoverEdge.visible = true;
@@ -1726,12 +1866,81 @@ function getLooseEdgeLoopCacheKey(mesh: THREE.Mesh, loop: LooseEdgeLoop) {
   return `${mesh.uuid}:${[...loop.segmentKeys].sort().join("~")}`;
 }
 
+function getLooseEdgeLoopMember(mesh: THREE.Mesh, loop: LooseEdgeLoop): LooseEdgeLoopMember | null {
+  const edge = createLooseEdgeFromLoop(mesh, loop);
+
+  if (!edge) {
+    return null;
+  }
+
+  return {
+    edge,
+    key: getLooseEdgeLoopCacheKey(mesh, loop),
+    loop,
+    mesh,
+  };
+}
+
+function getLinkedLooseEdgeLoopMembers(
+  modelRoot: THREE.Object3D | null,
+  edge: HoveredEdge,
+): LooseEdgeLoopMember[] {
+  const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
+  const fallbackMember = loop ? getLooseEdgeLoopMember(edge.mesh, loop) : null;
+
+  if (!modelRoot || !loop || !fallbackMember || loop.pairKey.length === 0) {
+    return fallbackMember ? [fallbackMember] : [];
+  }
+
+  const members: LooseEdgeLoopMember[] = [];
+
+  modelRoot.traverse((child) => {
+    if (!isSelectableMesh(child)) {
+      return;
+    }
+
+    const loopsById = child.userData.looseEdgeLoopById;
+
+    if (!(loopsById instanceof Map)) {
+      return;
+    }
+
+    loopsById.forEach((candidateLoop) => {
+      const typedLoop = candidateLoop as LooseEdgeLoop;
+
+      if (typedLoop.pairKey !== loop.pairKey) {
+        return;
+      }
+
+      const member = getLooseEdgeLoopMember(child, typedLoop);
+
+      if (member) {
+        members.push(member);
+      }
+    });
+  });
+
+  const objectIds = new Set(members.map((member) => member.loop.objectId));
+
+  return members.length === 2 && objectIds.size === 2 ? members : [fallbackMember];
+}
+
 function getLooseEdgeLoopFillKey(edge: HoveredEdge) {
   const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
 
   return loop
     ? getLooseEdgeLoopCacheKey(edge.mesh, loop)
     : `${edge.mesh.uuid}:${edge.objectId}:${edge.loopId ?? -1}`;
+}
+
+function getLooseEdgeLoopDisplayColor(
+  mesh: THREE.Mesh,
+  loop: LooseEdgeLoop,
+  loopCapStates: Map<string, LooseEdgeLoopCapState>,
+) {
+  return loopCapStates.has(getLooseEdgeLoopCacheKey(mesh, loop))
+    ? cappedLooseEdgeColor
+    : looseEdgeColor;
 }
 
 function getMeshObjectLocalCenter(mesh: THREE.Mesh, objectId: number) {
@@ -1975,7 +2184,7 @@ function getLooseEdgeLoopCapAxisData(
 
   let axis: THREE.Vector3 | null;
 
-  if (isNormalTargetLoopMode(mode) && normalTarget) {
+  if (mode !== "fill" && normalTarget) {
     axis = normalTarget.clone().sub(data.center);
 
     if (axis.lengthSq() < 0.000001) {
@@ -2017,10 +2226,9 @@ function getLooseEdgeLoopCapOffsetBounds(
     targetModelSize * 0.25,
     0.1,
   );
+  const limit = Math.max(span * 2, Math.abs(axisData.defaultOffset));
 
-  return mode === "fill"
-    ? { max: span, min: -span }
-    : { max: Math.max(span * 2, axisData.defaultOffset), min: 0.001 };
+  return mode === "fill" ? { max: span, min: -span } : { max: limit, min: -limit };
 }
 
 function clampLooseEdgeLoopCapOffset(
@@ -2103,11 +2311,12 @@ function createLooseEdgeLoopExtrusionGeometry(
 
   const extrusionLength = capOffset;
 
-  if (extrusionLength <= 0) {
-    return null;
+  if (Math.abs(extrusionLength) <= 0.000001) {
+    return createLooseEdgeLoopFlatFillGeometry(data, axis, 0);
   }
 
   const vertices: number[] = [];
+  const capNormal = axis.clone().multiplyScalar(Math.sign(extrusionLength) || 1);
   const capCenter = data.center.clone().addScaledVector(axis, extrusionLength);
   const capPoints = data.points.map((point) => {
     const capPoint = point.clone().addScaledVector(axis, extrusionLength);
@@ -2138,7 +2347,7 @@ function createLooseEdgeLoopExtrusionGeometry(
       capStart,
       getLoopTriangleOutwardNormal(segment.start, capEnd, capStart, data.objectCenter),
     );
-    pushLoopFillTriangle(vertices, capCenter, capStart, capEnd, axis);
+    pushLoopFillTriangle(vertices, capCenter, capStart, capEnd, capNormal);
   });
 
   return createLoopFillGeometry(vertices);
@@ -2179,7 +2388,7 @@ function createLooseEdgeLoopCylinderGeometry(
     pushLoopFillTriangle(vertices, data.center, segment.start, segment.end, capNormal);
   });
 
-  if (capOffset <= 0) {
+  if (Math.abs(capOffset) <= 0.000001) {
     return createLoopFillGeometry(vertices);
   }
 
@@ -2190,6 +2399,7 @@ function createLooseEdgeLoopCylinderGeometry(
   }
 
   const { bitangent, tangent } = getPerpendicularBasis(axis);
+  const topNormal = axis.clone().multiplyScalar(Math.sign(capOffset) || 1);
   const topCenter = data.center.clone().addScaledVector(axis, capOffset);
   const basePoints: THREE.Vector3[] = [];
   const topPoints: THREE.Vector3[] = [];
@@ -2223,7 +2433,7 @@ function createLooseEdgeLoopCylinderGeometry(
 
     pushLoopFillTriangle(vertices, baseStart, baseEnd, topEnd, sideNormal);
     pushLoopFillTriangle(vertices, baseStart, topEnd, topStart, sideNormal);
-    pushLoopFillTriangle(vertices, topCenter, topStart, topEnd, axis);
+    pushLoopFillTriangle(vertices, topCenter, topStart, topEnd, topNormal);
   }
 
   return createLoopFillGeometry(vertices);
@@ -2309,159 +2519,6 @@ function updateHoverEdgeResolution(model: THREE.Object3D, width: number, height:
       }
     }
   });
-}
-
-function getHoveredEdgeFromHit(
-  intersection: THREE.Intersection<THREE.Object3D>,
-): HoveredEdge | null {
-  if (intersection.faceIndex == null || !isSelectableMesh(intersection.object)) {
-    return null;
-  }
-
-  const mesh = intersection.object;
-  const position = mesh.geometry.getAttribute("position");
-
-  if (!(position instanceof THREE.BufferAttribute)) {
-    return null;
-  }
-
-  const triangle = getTriangleVertices(position, intersection.faceIndex * 3);
-  const objectIds = getTriangleObjectIds(mesh);
-  const objectId = objectIds?.[intersection.faceIndex] ?? defaultObjectId;
-
-  if (!triangle) {
-    return null;
-  }
-
-  const edgeIndexes = [
-    [0, 1],
-    [1, 2],
-    [2, 0],
-  ];
-  const closestPoint = new THREE.Vector3();
-  let closestEdge: HoveredEdge | null = null;
-  let closestDistance = Number.POSITIVE_INFINITY;
-
-  edgeIndexes.forEach(([startIndex, endIndex]) => {
-    const start = triangle[startIndex];
-    const end = triangle[endIndex];
-    const startWorld = start.point.clone().applyMatrix4(mesh.matrixWorld);
-    const endWorld = end.point.clone().applyMatrix4(mesh.matrixWorld);
-
-    new THREE.Line3(startWorld, endWorld).closestPointToPoint(
-      intersection.point,
-      true,
-      closestPoint,
-    );
-
-    const distance = closestPoint.distanceTo(intersection.point);
-
-    if (distance >= closestDistance) {
-      return;
-    }
-
-    closestDistance = distance;
-    closestEdge = {
-      end: end.point.clone(),
-      key: [start.key, end.key].sort().join("|"),
-      mesh,
-      objectId,
-      start: start.point.clone(),
-    };
-  });
-
-  return closestEdge;
-}
-
-function swapHoveredEdgeDiagonal(edge: HoveredEdge) {
-  const mesh = edge.mesh;
-  const position = mesh.geometry.getAttribute("position");
-
-  if (!(position instanceof THREE.BufferAttribute)) {
-    return false;
-  }
-
-  const { triangleEdgeKeys } = getTriangleEdges(position);
-  const triangleStarts = triangleEdgeKeys.reduce<number[]>((starts, edgeKeys, triangleIndex) => {
-    if (edgeKeys.includes(edge.key)) {
-      starts.push(triangleIndex * 3);
-    }
-
-    return starts;
-  }, []);
-
-  if (triangleStarts.length !== 2) {
-    return false;
-  }
-
-  const [firstTriangleStart, secondTriangleStart] = triangleStarts;
-  const objectIds = getTriangleObjectIds(mesh);
-  const firstTriangleIndex = firstTriangleStart / 3;
-  const secondTriangleIndex = secondTriangleStart / 3;
-
-  if (
-    (objectIds?.[firstTriangleIndex] ?? defaultObjectId) !==
-    (objectIds?.[secondTriangleIndex] ?? defaultObjectId)
-  ) {
-    return false;
-  }
-
-  const firstTriangle = getTriangleVertices(position, firstTriangleStart);
-  const secondTriangle = getTriangleVertices(position, secondTriangleStart);
-
-  if (!firstTriangle || !secondTriangle) {
-    return false;
-  }
-
-  const secondKeys = new Set(secondTriangle.map((vertex) => vertex.key));
-  const sharedKeys = firstTriangle.map((vertex) => vertex.key).filter((key) => secondKeys.has(key));
-
-  if (sharedKeys.length !== 2) {
-    return false;
-  }
-
-  const sharedKeySet = new Set(sharedKeys);
-  const firstOpposite = firstTriangle.find((vertex) => !sharedKeySet.has(vertex.key));
-  const secondOpposite = secondTriangle.find((vertex) => !sharedKeySet.has(vertex.key));
-  const sharedVertices = firstTriangle.filter((vertex) => sharedKeySet.has(vertex.key));
-
-  if (!firstOpposite || !secondOpposite || sharedVertices.length !== 2) {
-    return false;
-  }
-
-  const firstNormal = getTriangleNormal(firstTriangle);
-  const referenceNormal = firstNormal.clone().add(getTriangleNormal(secondTriangle));
-
-  if (referenceNormal.lengthSq() === 0) {
-    referenceNormal.copy(firstNormal);
-  }
-
-  const nextFirstTriangle = orientTriangle(
-    [firstOpposite, secondOpposite, sharedVertices[0]],
-    referenceNormal,
-  );
-  const nextSecondTriangle = orientTriangle(
-    [firstOpposite, sharedVertices[1], secondOpposite],
-    referenceNormal,
-  );
-
-  if (
-    getTriangleNormal(nextFirstTriangle).lengthSq() === 0 ||
-    getTriangleNormal(nextSecondTriangle).lengthSq() === 0
-  ) {
-    return false;
-  }
-
-  setTrianglePositions(position, firstTriangleStart, nextFirstTriangle);
-  setTrianglePositions(position, secondTriangleStart, nextSecondTriangle);
-  position.needsUpdate = true;
-  mesh.userData.hasPositionEdits = true;
-
-  mesh.geometry.computeVertexNormals();
-  mesh.geometry.computeBoundingBox();
-  mesh.geometry.computeBoundingSphere();
-
-  return true;
 }
 
 function buildMeshTopology(mesh: THREE.Mesh) {
@@ -2643,6 +2700,235 @@ async function separateLooseObjectPartsAsync(
       }
     }
   }
+}
+
+function addObjectJoinAdjacency(
+  adjacency: Map<number, Set<number>>,
+  firstObjectId: number,
+  secondObjectId: number,
+) {
+  adjacency.get(firstObjectId)?.add(secondObjectId);
+  adjacency.get(secondObjectId)?.add(firstObjectId);
+}
+
+function getPositionEdgeKey(
+  position: THREE.BufferAttribute,
+  firstIndex: number,
+  secondIndex: number,
+) {
+  return [getVertexPositionKey(position, firstIndex), getVertexPositionKey(position, secondIndex)]
+    .sort()
+    .join("|");
+}
+
+function createSelectedObjectJoinPlan(
+  modelRoot: THREE.Object3D,
+  selectedObjectIds: Set<number>,
+  primaryObjectId: number | null,
+): ObjectJoinPlan | null {
+  if (selectedObjectIds.size < 2) {
+    return null;
+  }
+
+  const selectedIds = Array.from(selectedObjectIds);
+  const adjacency = new Map<number, Set<number>>();
+
+  selectedIds.forEach((objectId) => adjacency.set(objectId, new Set()));
+
+  collectSelectableMeshes(modelRoot).forEach((mesh) => {
+    const position = mesh.geometry.getAttribute("position");
+    const objectIds = getTriangleObjectIds(mesh);
+
+    if (!(position instanceof THREE.BufferAttribute) || !objectIds) {
+      return;
+    }
+
+    const objectIdsByPositionEdgeKey = new Map<string, Set<number>>();
+
+    for (let startIndex = 0; startIndex < position.count; startIndex += 3) {
+      const triangleIndex = startIndex / 3;
+      const objectId = objectIds[triangleIndex] ?? defaultObjectId;
+
+      if (!selectedObjectIds.has(objectId)) {
+        continue;
+      }
+
+      [
+        [startIndex, startIndex + 1],
+        [startIndex + 1, startIndex + 2],
+        [startIndex + 2, startIndex],
+      ].forEach(([firstIndex, secondIndex]) => {
+        const edgeKey = getPositionEdgeKey(position, firstIndex, secondIndex);
+        let edgeObjectIds = objectIdsByPositionEdgeKey.get(edgeKey);
+
+        if (!edgeObjectIds) {
+          edgeObjectIds = new Set();
+          objectIdsByPositionEdgeKey.set(edgeKey, edgeObjectIds);
+        }
+
+        edgeObjectIds.add(objectId);
+      });
+    }
+
+    objectIdsByPositionEdgeKey.forEach((edgeObjectIds) => {
+      const edgeIds = Array.from(edgeObjectIds);
+
+      for (let firstIndex = 0; firstIndex < edgeIds.length; firstIndex += 1) {
+        for (let secondIndex = firstIndex + 1; secondIndex < edgeIds.length; secondIndex += 1) {
+          addObjectJoinAdjacency(adjacency, edgeIds[firstIndex], edgeIds[secondIndex]);
+        }
+      }
+    });
+  });
+
+  const remainingObjectIds = new Set(selectedIds);
+  const objectIdToTargetId = new Map<number, number>();
+  const targetObjectIds = new Set<number>();
+
+  selectedIds.forEach((objectId) => {
+    if (!remainingObjectIds.has(objectId)) {
+      return;
+    }
+
+    const component: number[] = [];
+    const stack = [objectId];
+
+    remainingObjectIds.delete(objectId);
+
+    for (let stackIndex = 0; stackIndex < stack.length; stackIndex += 1) {
+      const stackObjectId = stack[stackIndex];
+
+      component.push(stackObjectId);
+      adjacency.get(stackObjectId)?.forEach((adjacentObjectId) => {
+        if (!remainingObjectIds.has(adjacentObjectId)) {
+          return;
+        }
+
+        remainingObjectIds.delete(adjacentObjectId);
+        stack.push(adjacentObjectId);
+      });
+    }
+
+    if (component.length < 2) {
+      return;
+    }
+
+    const targetObjectId =
+      primaryObjectId != null && component.includes(primaryObjectId)
+        ? primaryObjectId
+        : (selectedIds.find((selectedId) => component.includes(selectedId)) ?? component[0]);
+
+    targetObjectIds.add(targetObjectId);
+    component.forEach((componentObjectId) => {
+      if (componentObjectId !== targetObjectId) {
+        objectIdToTargetId.set(componentObjectId, targetObjectId);
+      }
+    });
+  });
+
+  return objectIdToTargetId.size > 0 ? { objectIdToTargetId, targetObjectIds } : null;
+}
+
+function applySelectedObjectJoinPlan(modelRoot: THREE.Object3D, plan: ObjectJoinPlan) {
+  let changed = false;
+
+  collectSelectableMeshes(modelRoot).forEach((mesh) => {
+    const position = mesh.geometry.getAttribute("position");
+    const objectIds = getTriangleObjectIds(mesh);
+
+    if (!(position instanceof THREE.BufferAttribute) || !objectIds) {
+      return;
+    }
+
+    const edgeRefsByPositionEdgeKey = new Map<
+      string,
+      { objectId: number; vertexIndexes: [number, number] }[]
+    >();
+
+    for (let startIndex = 0; startIndex < position.count; startIndex += 3) {
+      const triangleIndex = startIndex / 3;
+      const objectId = objectIds[triangleIndex] ?? defaultObjectId;
+      const targetObjectId = plan.objectIdToTargetId.get(objectId) ?? objectId;
+
+      if (!plan.targetObjectIds.has(targetObjectId)) {
+        continue;
+      }
+
+      [
+        [startIndex, startIndex + 1],
+        [startIndex + 1, startIndex + 2],
+        [startIndex + 2, startIndex],
+      ].forEach(([firstIndex, secondIndex]) => {
+        const edgeKey = getPositionEdgeKey(position, firstIndex, secondIndex);
+        let edgeRefs = edgeRefsByPositionEdgeKey.get(edgeKey);
+
+        if (!edgeRefs) {
+          edgeRefs = [];
+          edgeRefsByPositionEdgeKey.set(edgeKey, edgeRefs);
+        }
+
+        edgeRefs.push({ objectId, vertexIndexes: [firstIndex, secondIndex] });
+      });
+    }
+
+    const seamVertexIndexes = new Set<number>();
+
+    edgeRefsByPositionEdgeKey.forEach((edgeRefs) => {
+      const originalObjectIds = new Set(edgeRefs.map((edgeRef) => edgeRef.objectId));
+      const targetObjectIds = new Set(
+        edgeRefs.map(
+          (edgeRef) => plan.objectIdToTargetId.get(edgeRef.objectId) ?? edgeRef.objectId,
+        ),
+      );
+
+      if (originalObjectIds.size < 2 || targetObjectIds.size !== 1) {
+        return;
+      }
+
+      edgeRefs.forEach((edgeRef) => {
+        seamVertexIndexes.add(edgeRef.vertexIndexes[0]);
+        seamVertexIndexes.add(edgeRef.vertexIndexes[1]);
+      });
+    });
+
+    let meshChanged = false;
+
+    for (let triangleIndex = 0; triangleIndex < objectIds.length; triangleIndex += 1) {
+      const targetObjectId = plan.objectIdToTargetId.get(objectIds[triangleIndex]);
+
+      if (targetObjectId == null) {
+        continue;
+      }
+
+      objectIds[triangleIndex] = targetObjectId;
+      meshChanged = true;
+    }
+
+    if (seamVertexIndexes.size > 0) {
+      const topologyIds = ensureVertexTopologyIds(position);
+
+      seamVertexIndexes.forEach((vertexIndex) => {
+        if (topologyIds[vertexIndex] === 0) {
+          return;
+        }
+
+        topologyIds[vertexIndex] = 0;
+        meshChanged = true;
+      });
+    }
+
+    if (!meshChanged) {
+      return;
+    }
+
+    refreshTriangleObjectIdAttribute(mesh);
+    mesh.geometry.computeVertexNormals();
+    mesh.geometry.computeBoundingBox();
+    mesh.geometry.computeBoundingSphere();
+    changed = true;
+  });
+
+  return changed;
 }
 
 function buildLinkedFaceSelection(
@@ -3319,6 +3605,25 @@ function isSelectableMesh(object: THREE.Object3D): object is THREE.Mesh {
   );
 }
 
+function isEditableHotkeyTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  return Boolean(
+    target.closest("input, textarea, select, [contenteditable='true'], [contenteditable='']") ||
+      (target instanceof HTMLElement && target.isContentEditable),
+  );
+}
+
+function isEditableHotkeyEvent(event: KeyboardEvent) {
+  return (
+    isEditableHotkeyTarget(event.target) ||
+    isEditableHotkeyTarget(document.activeElement) ||
+    event.composedPath().some((target) => isEditableHotkeyTarget(target))
+  );
+}
+
 function collectSelectableMeshes(model: THREE.Object3D) {
   const meshes: THREE.Mesh[] = [];
 
@@ -3451,6 +3756,106 @@ function createPersistedViewerState(
   };
 }
 
+function getViewerHistoryMeshState(
+  mesh: THREE.Mesh,
+  meshIndex: number,
+): ViewerHistoryMeshState | null {
+  const position = mesh.geometry.getAttribute("position");
+  const objectIds = getTriangleObjectIds(mesh);
+
+  if (!(position instanceof THREE.BufferAttribute) || !objectIds) {
+    return null;
+  }
+
+  const topologyIds = vertexTopologyIdsByPosition.get(position);
+
+  return {
+    hasPositionEdits: mesh.userData.hasPositionEdits === true,
+    meshIndex,
+    positions: cloneFloat32Array(position.array),
+    triangleObjectIds: cloneUint32Array(objectIds),
+    vertexTopologyIds: topologyIds
+      ? cloneUint32Array(topologyIds)
+      : new Uint32Array(position.count),
+  };
+}
+
+function createViewerHistorySnapshot(
+  modelRoot: THREE.Object3D,
+  hiddenObjectIds: Set<number>,
+  objectNames: ObjectNameMap,
+  nextObjectId: number,
+  loopCapStates: Map<string, LooseEdgeLoopCapState>,
+): ViewerHistorySnapshot {
+  const meshes = collectSelectableMeshes(modelRoot);
+  const loopCapStateSnapshots: PersistedLoopCapState[] = [];
+
+  loopCapStates.forEach((state, key) => {
+    const persistedState = getPersistedLoopCapState(meshes, key, state);
+
+    if (persistedState) {
+      loopCapStateSnapshots.push(persistedState);
+    }
+  });
+
+  return {
+    hiddenObjectIds: Array.from(hiddenObjectIds).sort((first, second) => first - second),
+    loopCapStates: loopCapStateSnapshots,
+    meshes: meshes
+      .map((mesh, meshIndex) => getViewerHistoryMeshState(mesh, meshIndex))
+      .filter((meshState): meshState is ViewerHistoryMeshState => meshState !== null),
+    nextObjectId,
+    objectNames: { ...objectNames },
+  };
+}
+
+function applyViewerHistoryMeshStates(
+  modelRoot: THREE.Object3D,
+  meshStates: ViewerHistoryMeshState[],
+) {
+  const meshes = collectSelectableMeshes(modelRoot);
+  let hadInvalidState = meshStates.length !== meshes.length;
+
+  meshStates.forEach((meshState) => {
+    const mesh = meshes[meshState.meshIndex];
+    const position = mesh?.geometry.getAttribute("position");
+    const triangleCount =
+      position instanceof THREE.BufferAttribute ? Math.floor(position.count / 3) : 0;
+
+    if (!mesh || !(position instanceof THREE.BufferAttribute)) {
+      hadInvalidState = true;
+      return;
+    }
+
+    if (meshState.positions.length === position.array.length) {
+      position.array.set(meshState.positions);
+      position.needsUpdate = true;
+      mesh.userData.hasPositionEdits = meshState.hasPositionEdits;
+    } else {
+      hadInvalidState = true;
+    }
+
+    if (meshState.triangleObjectIds.length === triangleCount) {
+      mesh.geometry.userData.triangleObjectIds = cloneUint32Array(meshState.triangleObjectIds);
+      refreshTriangleObjectIdAttribute(mesh);
+    } else {
+      hadInvalidState = true;
+    }
+
+    if (meshState.vertexTopologyIds.length === position.count) {
+      vertexTopologyIdsByPosition.set(position, cloneUint32Array(meshState.vertexTopologyIds));
+    } else {
+      hadInvalidState = true;
+    }
+
+    mesh.geometry.computeVertexNormals();
+    mesh.geometry.computeBoundingBox();
+    mesh.geometry.computeBoundingSphere();
+  });
+
+  return hadInvalidState;
+}
+
 function applyPersistedMeshStates(model: THREE.Object3D, meshStates: PersistedMeshState[]) {
   const meshes = collectSelectableMeshes(model);
   let hadInvalidState = false;
@@ -3563,6 +3968,232 @@ function createLooseEdgeFromLoop(mesh: THREE.Mesh, loop: LooseEdgeLoop): Hovered
   };
 }
 
+function getSafeExportName(name: string) {
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim() || "Object";
+}
+
+function getBlenderExportFileName(sourceName: string) {
+  const baseName = sourceName.replace(/\.[^/.]+$/, "");
+
+  return `${getSafeExportName(baseName || "model")}-blender.glb`;
+}
+
+function createExportMaterial(name: string, color: THREE.Color) {
+  return new THREE.MeshStandardMaterial({
+    color,
+    metalness: 0,
+    name,
+    roughness: 0.82,
+    side: THREE.DoubleSide,
+  });
+}
+
+function getExportObjectGeometry(
+  exportObjects: Map<number, ExportObjectGeometry>,
+  objectId: number,
+) {
+  let objectGeometry = exportObjects.get(objectId);
+
+  if (!objectGeometry) {
+    objectGeometry = { basePositions: [], generatedGroups: [] };
+    exportObjects.set(objectId, objectGeometry);
+  }
+
+  return objectGeometry;
+}
+
+function appendExportGeometryPositions(
+  positions: number[],
+  geometry: THREE.BufferGeometry,
+  matrixWorld: THREE.Matrix4,
+) {
+  const position = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const point = new THREE.Vector3();
+
+  if (!(position instanceof THREE.BufferAttribute)) {
+    return;
+  }
+
+  if (index) {
+    for (let itemIndex = 0; itemIndex < index.count; itemIndex += 1) {
+      point.fromBufferAttribute(position, index.getX(itemIndex)).applyMatrix4(matrixWorld);
+      positions.push(point.x, point.y, point.z);
+    }
+
+    return;
+  }
+
+  for (let itemIndex = 0; itemIndex < position.count; itemIndex += 1) {
+    point.fromBufferAttribute(position, itemIndex).applyMatrix4(matrixWorld);
+    positions.push(point.x, point.y, point.z);
+  }
+}
+
+function addBaseObjectGeometryToExportObjects(
+  exportObjects: Map<number, ExportObjectGeometry>,
+  modelRoot: THREE.Object3D,
+) {
+  const point = new THREE.Vector3();
+
+  modelRoot.updateMatrixWorld(true);
+
+  collectSelectableMeshes(modelRoot).forEach((mesh) => {
+    const position = mesh.geometry.getAttribute("position");
+    const objectIds = getTriangleObjectIds(mesh);
+
+    if (!(position instanceof THREE.BufferAttribute)) {
+      return;
+    }
+
+    mesh.updateMatrixWorld(true);
+
+    for (let index = 0; index < position.count; index += 3) {
+      const triangleIndex = index / 3;
+      const objectId = objectIds?.[triangleIndex] ?? defaultObjectId;
+      const positions = getExportObjectGeometry(exportObjects, objectId).basePositions;
+
+      for (let offset = 0; offset < 3; offset += 1) {
+        point.fromBufferAttribute(position, index + offset).applyMatrix4(mesh.matrixWorld);
+        positions.push(point.x, point.y, point.z);
+      }
+    }
+  });
+}
+
+function addGeneratedLoopGeometryToExportObjects(
+  exportObjects: Map<number, ExportObjectGeometry>,
+  loopCapStates: Map<string, LooseEdgeLoopCapState>,
+  objectNames: ObjectNameMap,
+) {
+  const generatedGroupCountByObjectId = new Map<number, number>();
+
+  loopCapStates.forEach((state) => {
+    const fill = state.fill;
+
+    if (!fill) {
+      return;
+    }
+
+    const positions: number[] = [];
+
+    fill.updateMatrixWorld(true);
+    appendExportGeometryPositions(positions, fill.geometry, fill.matrixWorld);
+
+    if (positions.length === 0) {
+      return;
+    }
+
+    const groupNumber = (generatedGroupCountByObjectId.get(state.objectId) ?? 0) + 1;
+
+    generatedGroupCountByObjectId.set(state.objectId, groupNumber);
+    getExportObjectGeometry(exportObjects, state.objectId).generatedGroups.push({
+      materialName: getSafeExportName(
+        `${getSeparatedObjectLabel(state.objectId, objectNames)} ${state.mode} ${groupNumber}`,
+      ),
+      positions,
+    });
+  });
+}
+
+function createMergedExportMesh(
+  objectId: number,
+  objectGeometry: ExportObjectGeometry,
+  objectNames: ObjectNameMap,
+) {
+  const geometry = new THREE.BufferGeometry();
+  const materials: THREE.Material[] = [];
+  const objectName = getSafeExportName(getSeparatedObjectLabel(objectId, objectNames));
+  const objectColor = getSeparatedObjectColor(objectId);
+  const positionValueCount =
+    objectGeometry.basePositions.length +
+    objectGeometry.generatedGroups.reduce((total, group) => total + group.positions.length, 0);
+  const positions = new Float32Array(positionValueCount);
+  let positionOffset = 0;
+
+  const addGroup = (groupPositions: number[], materialName: string) => {
+    if (groupPositions.length === 0) {
+      return;
+    }
+
+    const start = positionOffset / 3;
+    const count = groupPositions.length / 3;
+
+    positions.set(groupPositions, positionOffset);
+    positionOffset += groupPositions.length;
+    geometry.addGroup(start, count, materials.length);
+    materials.push(createExportMaterial(materialName, objectColor));
+  };
+
+  addGroup(objectGeometry.basePositions, `${objectName} faces`);
+  objectGeometry.generatedGroups.forEach((group) => {
+    addGroup(group.positions, group.materialName);
+  });
+
+  if (positionOffset === 0) {
+    return null;
+  }
+
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+
+  const mesh = new THREE.Mesh(geometry, materials.length === 1 ? materials[0] : materials);
+
+  mesh.name = objectName;
+
+  return mesh;
+}
+
+function addMergedObjectMeshesToExportScene(
+  scene: THREE.Scene,
+  modelRoot: THREE.Object3D,
+  objectNames: ObjectNameMap,
+  loopCapStates: Map<string, LooseEdgeLoopCapState>,
+) {
+  const exportObjects = new Map<number, ExportObjectGeometry>();
+
+  addBaseObjectGeometryToExportObjects(exportObjects, modelRoot);
+  addGeneratedLoopGeometryToExportObjects(exportObjects, loopCapStates, objectNames);
+
+  Array.from(exportObjects.entries())
+    .sort(([firstObjectId], [secondObjectId]) => firstObjectId - secondObjectId)
+    .forEach(([objectId, objectGeometry]) => {
+      const mesh = createMergedExportMesh(objectId, objectGeometry, objectNames);
+
+      if (mesh) {
+        scene.add(mesh);
+      }
+    });
+}
+
+function createBlenderExportScene(
+  modelRoot: THREE.Object3D,
+  objectNames: ObjectNameMap,
+  loopCapStates: Map<string, LooseEdgeLoopCapState>,
+) {
+  const scene = new THREE.Scene();
+
+  scene.name = "Blender GLB export";
+  addMergedObjectMeshesToExportScene(scene, modelRoot, objectNames, loopCapStates);
+
+  return scene;
+}
+
+function downloadArrayBuffer(data: ArrayBuffer, fileName: string, mimeType: string) {
+  const url = URL.createObjectURL(new Blob([data], { type: mimeType }));
+  const anchor = document.createElement("a");
+
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 type ModelViewerProps = {
   tools: ViewerTool[];
 };
@@ -3598,6 +4229,9 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const persistenceSaveFailedRef = useRef(false);
   const isRestoringPersistedStateRef = useRef(false);
   const modelLoadVersionRef = useRef(0);
+  const historySnapshotsRef = useRef<ViewerHistorySnapshot[]>([]);
+  const capNormalTransformHistorySnapshotRef = useRef<ViewerHistorySnapshot | null>(null);
+  const capNormalTransformChangedRef = useRef(false);
   const nextSeparatedObjectIdRef = useRef(1);
   const hiddenObjectIdsRef = useRef<Set<number>>(new Set());
   const objectNamesRef = useRef<ObjectNameMap>({});
@@ -3606,13 +4240,19 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const separationBusyRef = useRef(false);
   const separateModeActiveRef = useRef(false);
   const selectedObjectIdRef = useRef<number | null>(null);
+  const selectedObjectIdsRef = useRef<Set<number>>(new Set());
   const clearLinkedFaceSelectionHandlerRef = useRef<(() => void) | null>(null);
   const clearSelectedLooseEdgeLoopHandlerRef = useRef<(() => void) | null>(null);
   const hideSelectedObjectHandlerRef = useRef<(() => void) | null>(null);
   const selectLooseEdgeLoopHandlerRef = useRef<((edge: HoveredEdge) => void) | null>(null);
-  const selectSeparatedObjectHandlerRef = useRef<((objectId: number) => void) | null>(null);
+  const selectSeparatedObjectHandlerRef = useRef<
+    ((objectId: number, additive?: boolean) => void) | null
+  >(null);
   const separateByBoundaryLoopHandlerRef = useRef<((loopId: number) => void) | null>(null);
   const schedulePersistViewerStateHandlerRef = useRef<(() => void) | null>(null);
+  const getLooseEdgeLoopCapStateHandlerRef = useRef<
+    ((edge: HoveredEdge) => LooseEdgeLoopCapState | null) | null
+  >(null);
   const setLooseEdgeLoopCapOffsetHandlerRef = useRef<
     ((edge: HoveredEdge, offset: number) => void) | null
   >(null);
@@ -3620,6 +4260,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     ((edge: HoveredEdge, target: THREE.Vector3) => void) | null
   >(null);
   const showAllObjectsHandlerRef = useRef<(() => void) | null>(null);
+  const undoLastViewerActionHandlerRef = useRef<(() => void) | null>(null);
   const syncLooseEdgeLoopCapStatesHandlerRef = useRef<
     ((modelRoot?: THREE.Object3D | null) => void) | null
   >(null);
@@ -3639,6 +4280,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const hoveredEdgeRef = useRef<HoveredEdge | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [canUndo, setCanUndo] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("empty");
   const [statusText, setStatusText] = useState("No model loaded");
   const [linkedFaceSelection, setLinkedFaceSelection] = useState<LinkedFaceSelectionState>({
@@ -3654,6 +4297,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const [separationProgress, setSeparationProgress] = useState<string | null>(null);
   const [separatedObjects, setSeparatedObjects] = useState<SeparatedObjectSummary[]>([]);
   const [selectedObjectId, setSelectedObjectId] = useState<number | null>(null);
+  const [selectedObjectIds, setSelectedObjectIds] = useState<Set<number>>(new Set());
   const [selectedLooseEdgeLoopActive, setSelectedLooseEdgeLoopActive] = useState(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
@@ -3670,6 +4314,55 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       setToast((current) => (current?.id === id ? null : current));
       toastTimeoutRef.current = null;
     }, toastDurationMs);
+  };
+
+  const setObjectSelectionState = (objectIds: Set<number>, primaryObjectId: number | null) => {
+    const nextObjectIds = new Set(objectIds);
+
+    selectedObjectIdsRef.current = nextObjectIds;
+    selectedObjectIdRef.current = primaryObjectId;
+    setSelectedObjectIds(nextObjectIds);
+    setSelectedObjectId(primaryObjectId);
+  };
+
+  const clearObjectSelectionState = () => {
+    setObjectSelectionState(new Set<number>(), null);
+  };
+
+  const refreshLooseEdgeLoopDisplayColors = (
+    modelRoot: THREE.Object3D | null = rootRef.current,
+  ) => {
+    if (!modelRoot) {
+      return;
+    }
+
+    modelRoot.traverse((child) => {
+      if (!isSelectableMesh(child)) {
+        return;
+      }
+
+      const loopsById = child.userData.looseEdgeLoopById;
+
+      if (!(loopsById instanceof Map)) {
+        return;
+      }
+
+      loopsById.forEach((loop) => {
+        const typedLoop = loop as LooseEdgeLoop;
+
+        setLooseEdgeLoopColor(
+          child,
+          typedLoop.id,
+          getLooseEdgeLoopDisplayColor(child, typedLoop, looseEdgeLoopCapStatesRef.current),
+        );
+      });
+    });
+
+    const selectedLoop = selectedLooseEdgeLoopRef.current;
+
+    if (selectedLoop) {
+      setLooseEdgeLoopColor(selectedLoop.mesh, selectedLoop.loopId, selectedLooseEdgeLoopColor);
+    }
   };
 
   const persistViewerStateNow = async () => {
@@ -3714,6 +4407,38 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       persistenceSaveTimeoutRef.current = null;
       void persistViewerStateNow();
     }, persistenceSaveDelayMs);
+  };
+
+  const createCurrentViewerHistorySnapshot = () => {
+    const modelRoot = rootRef.current;
+
+    if (!modelRoot || !currentModelSourceRef.current) {
+      return null;
+    }
+
+    return createViewerHistorySnapshot(
+      modelRoot,
+      hiddenObjectIdsRef.current,
+      objectNamesRef.current,
+      nextSeparatedObjectIdRef.current,
+      looseEdgeLoopCapStatesRef.current,
+    );
+  };
+
+  const pushViewerHistorySnapshot = (snapshot: ViewerHistorySnapshot | null) => {
+    if (!snapshot) {
+      return;
+    }
+
+    historySnapshotsRef.current.push(snapshot);
+    setCanUndo(true);
+  };
+
+  const clearViewerHistory = () => {
+    historySnapshotsRef.current = [];
+    capNormalTransformHistorySnapshotRef.current = null;
+    capNormalTransformChangedRef.current = false;
+    setCanUndo(false);
   };
 
   const clearScheduledPersistenceSave = () => {
@@ -3857,6 +4582,52 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     });
   };
 
+  const getLooseEdgeLoopMembers = (edge: HoveredEdge) =>
+    getLinkedLooseEdgeLoopMembers(rootRef.current, edge);
+
+  const getLooseEdgeLoopCapState = (edge: HoveredEdge) => {
+    const directState = looseEdgeLoopCapStatesRef.current.get(getLooseEdgeLoopFillKey(edge));
+
+    if (directState) {
+      return directState;
+    }
+
+    return (
+      getLooseEdgeLoopMembers(edge)
+        .map((member) => looseEdgeLoopCapStatesRef.current.get(member.key))
+        .find((state): state is LooseEdgeLoopCapState => Boolean(state)) ?? null
+    );
+  };
+
+  const getLoopWorldAxis = (edge: HoveredEdge, localAxis: THREE.Vector3) => {
+    edge.mesh.updateMatrixWorld(true);
+
+    return localAxis.clone().transformDirection(edge.mesh.matrixWorld).normalize();
+  };
+
+  const getMirroredLoopNormalTarget = (
+    sourceEdge: HoveredEdge,
+    memberEdge: HoveredEdge,
+    sourceAxisWorld: THREE.Vector3,
+    offset: number,
+  ) => {
+    const sourceData = getLooseEdgeLoopFillData(sourceEdge);
+    const memberData = getLooseEdgeLoopFillData(memberEdge);
+
+    if (!sourceData || !memberData || sourceAxisWorld.lengthSq() === 0) {
+      return null;
+    }
+
+    sourceEdge.mesh.updateMatrixWorld(true);
+    memberEdge.mesh.updateMatrixWorld(true);
+
+    const targetDistance = Math.max(Math.abs(offset), 0.001);
+    const memberCenterWorld = memberEdge.mesh.localToWorld(memberData.center.clone());
+    const targetWorld = memberCenterWorld.addScaledVector(sourceAxisWorld, targetDistance);
+
+    return memberEdge.mesh.worldToLocal(targetWorld);
+  };
+
   const refreshCapOffsetGizmo = (edge = selectedLooseEdgeLoopRef.current) => {
     const modelRoot = rootRef.current;
 
@@ -3866,7 +4637,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }
 
     const key = getLooseEdgeLoopFillKey(edge);
-    const state = looseEdgeLoopCapStatesRef.current.get(key);
+    const state = getLooseEdgeLoopCapState(edge);
     const axisData = state
       ? getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget)
       : null;
@@ -4037,10 +4808,10 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
     state.offset = clampLooseEdgeLoopCapOffset(edge, state.mode, state.offset, state.normalTarget);
 
-    if (isNormalTargetLoopMode(state.mode)) {
+    if (state.mode !== "fill" && (state.normalTarget || isNormalTargetLoopMode(state.mode))) {
       state.normalTarget = axisData.data.center
         .clone()
-        .addScaledVector(axisData.axis, state.offset);
+        .addScaledVector(axisData.axis, Math.max(Math.abs(state.offset), 0.001));
     }
 
     const fill = createLooseEdgeLoopFill(edge, state.mode, state.offset, state.normalTarget);
@@ -4090,7 +4861,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
       const key = getLooseEdgeLoopFillKey(edge);
       const normalTarget =
-        capState.normalTarget && isNormalTargetLoopMode(capState.mode)
+        capState.normalTarget && capState.mode !== "fill"
           ? new THREE.Vector3(
               capState.normalTarget[0],
               capState.normalTarget[1],
@@ -4131,6 +4902,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     });
 
     refreshLooseEdgeLoopCapVisibility();
+    refreshLooseEdgeLoopDisplayColors(modelRoot);
 
     return hadInvalidState;
   };
@@ -4140,8 +4912,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       return;
     }
 
-    const key = getLooseEdgeLoopFillKey(edge);
-    const state = looseEdgeLoopCapStatesRef.current.get(key);
+    const members = getLooseEdgeLoopMembers(edge);
+    const state = getLooseEdgeLoopCapState(edge);
 
     if (!state || !isNormalTargetLoopMode(state.mode)) {
       refreshCapOffsetGizmo(edge);
@@ -4157,8 +4929,12 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     const requestedOffset = target.distanceTo(axisData.data.center);
     const nextOffset = clampLooseEdgeLoopCapOffset(edge, state.mode, requestedOffset, target);
     const nextTarget = axisData.data.center.clone().addScaledVector(axisData.axis, nextOffset);
+    const missingMemberState = members.some(
+      (member) => !looseEdgeLoopCapStatesRef.current.has(member.key),
+    );
 
     if (
+      !missingMemberState &&
       Math.abs(nextOffset - state.offset) < 0.0001 &&
       state.normalTarget &&
       nextTarget.distanceToSquared(state.normalTarget) < 0.000001
@@ -4166,9 +4942,31 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       return;
     }
 
-    state.offset = nextOffset;
-    state.normalTarget = nextTarget;
-    rebuildLooseEdgeLoopCapFill(edge, key, state);
+    const sourceAxisWorld = getLoopWorldAxis(edge, axisData.axis);
+
+    members.forEach((member) => {
+      const memberState = looseEdgeLoopCapStatesRef.current.get(member.key) ?? {
+        fill: null,
+        mode: state.mode,
+        normalTarget: null,
+        objectId: member.edge.objectId,
+        occlusionOverlay: null,
+        offset: nextOffset,
+        sourceMeshUuid: member.edge.mesh.uuid,
+      };
+
+      memberState.mode = state.mode;
+      memberState.objectId = member.edge.objectId;
+      memberState.sourceMeshUuid = member.edge.mesh.uuid;
+      memberState.offset = nextOffset;
+      memberState.normalTarget = getMirroredLoopNormalTarget(
+        edge,
+        member.edge,
+        sourceAxisWorld,
+        nextOffset,
+      );
+      rebuildLooseEdgeLoopCapFill(member.edge, member.key, memberState);
+    });
     refreshCapOffsetGizmo(edge);
     schedulePersistViewerState();
   };
@@ -4209,12 +5007,11 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
     refreshLooseEdgeLoopCapVisibility();
     refreshCapOffsetGizmo();
+    refreshLooseEdgeLoopDisplayColors(modelRoot);
   };
 
   const getLooseEdgeLoopCapMode = (edge: HoveredEdge) => {
-    const key = getLooseEdgeLoopFillKey(edge);
-
-    return looseEdgeLoopCapStatesRef.current.get(key)?.mode ?? "none";
+    return getLooseEdgeLoopCapState(edge)?.mode ?? "none";
   };
 
   const setLooseEdgeLoopCapMode = (edge: HoveredEdge, mode: LooseEdgeLoopMode) => {
@@ -4222,20 +5019,40 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       return;
     }
 
-    const key = getLooseEdgeLoopFillKey(edge);
-    const existingState = looseEdgeLoopCapStatesRef.current.get(key);
+    const members = getLooseEdgeLoopMembers(edge);
+    const existingState = getLooseEdgeLoopCapState(edge);
     const existingMode = existingState?.mode;
+    const shouldPreserveExistingAxisTarget =
+      existingMode === mode ||
+      (existingMode != null &&
+        isNormalTargetLoopMode(existingMode) &&
+        isNormalTargetLoopMode(mode));
+    const existingAxisTarget = shouldPreserveExistingAxisTarget
+      ? (existingState?.normalTarget ?? null)
+      : null;
     const axisData =
-      mode === "none"
-        ? null
-        : getLooseEdgeLoopCapAxisData(edge, mode, existingState?.normalTarget ?? null);
+      mode === "none" ? null : getLooseEdgeLoopCapAxisData(edge, mode, existingAxisTarget);
 
     if (mode === "none") {
-      if (existingState) {
-        removeLooseEdgeLoopCapFill(existingState);
-        looseEdgeLoopCapStatesRef.current.delete(key);
+      const hadExistingState = members.some((member) =>
+        looseEdgeLoopCapStatesRef.current.has(member.key),
+      );
+
+      if (hadExistingState) {
+        pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+        members.forEach((member) => {
+          const memberState = looseEdgeLoopCapStatesRef.current.get(member.key);
+
+          if (!memberState) {
+            return;
+          }
+
+          removeLooseEdgeLoopCapFill(memberState);
+          looseEdgeLoopCapStatesRef.current.delete(member.key);
+        });
       }
       refreshCapOffsetGizmo(edge);
+      refreshLooseEdgeLoopDisplayColors(edge.mesh.parent ?? rootRef.current);
       schedulePersistViewerState();
       return;
     }
@@ -4245,50 +5062,44 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       return;
     }
 
-    const existingOffset = existingState?.offset;
-    const state: LooseEdgeLoopCapState = existingState ?? {
-      fill: null,
-      mode,
-      normalTarget: null,
-      occlusionOverlay: null,
-      objectId: edge.objectId,
-      offset: axisData.defaultOffset,
-      sourceMeshUuid: edge.mesh.uuid,
-    };
-
-    state.mode = mode;
-    state.objectId = edge.objectId;
-    state.sourceMeshUuid = edge.mesh.uuid;
-
-    if (mode === "fill") {
-      state.offset = axisData.defaultOffset;
-    } else if (existingMode !== mode || !Number.isFinite(state.offset)) {
-      state.offset = axisData.defaultOffset;
+    if (!existingState || existingMode !== mode) {
+      pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
     }
 
-    state.normalTarget = isNormalTargetLoopMode(mode)
-      ? existingMode === mode && state.normalTarget
-        ? state.normalTarget
-        : axisData.data.center.clone().addScaledVector(axisData.axis, state.offset)
-      : null;
+    const nextOffset =
+      mode === "fill"
+        ? 0
+        : existingMode === mode && existingState && Number.isFinite(existingState.offset)
+          ? existingState.offset
+          : axisData.defaultOffset;
+    const shouldStoreAxisTarget =
+      mode !== "fill" && (members.length > 1 || isNormalTargetLoopMode(mode));
+    const sourceAxisWorld = shouldStoreAxisTarget ? getLoopWorldAxis(edge, axisData.axis) : null;
 
-    const existingFill = state.fill;
-    const canReuseExistingFill =
-      existingFill !== null &&
-      existingMode === mode &&
-      (mode !== "fill" ||
-        Math.abs((existingOffset ?? axisData.defaultOffset) - axisData.defaultOffset) < 0.0001);
+    members.forEach((member) => {
+      const memberState = looseEdgeLoopCapStatesRef.current.get(member.key) ?? {
+        fill: null,
+        mode,
+        normalTarget: null,
+        objectId: member.edge.objectId,
+        occlusionOverlay: null,
+        offset: nextOffset,
+        sourceMeshUuid: member.edge.mesh.uuid,
+      };
 
-    if (canReuseExistingFill) {
-      existingFill.visible = !hiddenObjectIdsRef.current.has(edge.objectId);
-      looseEdgeLoopCapStatesRef.current.set(key, state);
-      refreshCapOffsetGizmo(edge);
-      schedulePersistViewerState();
-      return;
-    }
+      memberState.mode = mode;
+      memberState.objectId = member.edge.objectId;
+      memberState.sourceMeshUuid = member.edge.mesh.uuid;
+      memberState.offset = nextOffset;
+      memberState.normalTarget =
+        sourceAxisWorld && shouldStoreAxisTarget
+          ? getMirroredLoopNormalTarget(edge, member.edge, sourceAxisWorld, nextOffset)
+          : null;
 
-    rebuildLooseEdgeLoopCapFill(edge, key, state);
+      rebuildLooseEdgeLoopCapFill(member.edge, member.key, memberState);
+    });
     refreshCapOffsetGizmo(edge);
+    refreshLooseEdgeLoopDisplayColors(edge.mesh.parent ?? rootRef.current);
     schedulePersistViewerState();
   };
 
@@ -4297,8 +5108,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       return;
     }
 
-    const key = getLooseEdgeLoopFillKey(edge);
-    const state = looseEdgeLoopCapStatesRef.current.get(key);
+    const members = getLooseEdgeLoopMembers(edge);
+    const state = getLooseEdgeLoopCapState(edge);
 
     if (!state || state.mode === "none") {
       refreshCapOffsetGizmo(edge);
@@ -4306,24 +5117,44 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }
 
     const nextOffset = clampLooseEdgeLoopCapOffset(edge, state.mode, offset, state.normalTarget);
+    const missingMemberState = members.some(
+      (member) => !looseEdgeLoopCapStatesRef.current.has(member.key),
+    );
 
-    if (Math.abs(nextOffset - state.offset) < 0.0001) {
+    if (!missingMemberState && Math.abs(nextOffset - state.offset) < 0.0001) {
       return;
     }
 
-    state.offset = nextOffset;
+    const shouldStoreAxisTarget =
+      state.mode !== "fill" &&
+      (members.length > 1 || isNormalTargetLoopMode(state.mode) || Boolean(state.normalTarget));
+    const selectedAxisData = shouldStoreAxisTarget
+      ? getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget)
+      : null;
+    const sourceAxisWorld = selectedAxisData ? getLoopWorldAxis(edge, selectedAxisData.axis) : null;
 
-    if (isNormalTargetLoopMode(state.mode)) {
-      const axisData = getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget);
+    members.forEach((member) => {
+      const memberState = looseEdgeLoopCapStatesRef.current.get(member.key) ?? {
+        fill: null,
+        mode: state.mode,
+        normalTarget: null,
+        objectId: member.edge.objectId,
+        occlusionOverlay: null,
+        offset: nextOffset,
+        sourceMeshUuid: member.edge.mesh.uuid,
+      };
 
-      if (axisData) {
-        state.normalTarget = axisData.data.center
-          .clone()
-          .addScaledVector(axisData.axis, nextOffset);
-      }
-    }
+      memberState.mode = state.mode;
+      memberState.objectId = member.edge.objectId;
+      memberState.sourceMeshUuid = member.edge.mesh.uuid;
+      memberState.offset = nextOffset;
+      memberState.normalTarget =
+        sourceAxisWorld && shouldStoreAxisTarget
+          ? getMirroredLoopNormalTarget(edge, member.edge, sourceAxisWorld, nextOffset)
+          : null;
 
-    rebuildLooseEdgeLoopCapFill(edge, key, state);
+      rebuildLooseEdgeLoopCapFill(member.edge, member.key, memberState);
+    });
     refreshCapOffsetGizmo(edge);
     schedulePersistViewerState();
   };
@@ -4331,10 +5162,6 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const clearSelectedLooseEdgeLoop = () => {
     const currentLoop = selectedLooseEdgeLoopRef.current;
     const overlay = selectedLooseEdgeLoopOverlayRef.current;
-
-    if (currentLoop) {
-      setLooseEdgeLoopColor(currentLoop.mesh, currentLoop.loopId, looseEdgeColor);
-    }
 
     if (overlay) {
       overlay.parent?.remove(overlay);
@@ -4346,17 +5173,19 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     selectedLooseEdgeLoopRef.current = null;
     setSelectedLooseEdgeLoopActive(false);
     refreshLooseEdgeLoopCapVisibility();
+    refreshLooseEdgeLoopDisplayColors(currentLoop?.mesh.parent ?? rootRef.current);
   };
 
   const resetViewerStateForModelLoad = () => {
     clearScheduledPersistenceSave();
+    clearViewerHistory();
     currentModelSourceRef.current = null;
     persistenceSaveFailedRef.current = false;
     nextSeparatedObjectIdRef.current = 1;
     hiddenObjectIdsRef.current = new Set();
     objectNamesRef.current = {};
     rememberedTriangleSelectionRef.current = null;
-    selectedObjectIdRef.current = null;
+    clearObjectSelectionState();
     linkedFaceSelectionThresholdRef.current = defaultLinkedFaceSelectionAngle;
     setSeparateModeActiveState(false);
     setSeparationBusyState(false);
@@ -4372,7 +5201,6 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     });
     setLooseEdgeLoopMode("none");
     setSeparatedObjects([]);
-    setSelectedObjectId(null);
     setSelectedLooseEdgeLoopActive(false);
   };
 
@@ -4390,6 +5218,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     setLooseEdgeLoopMode(getLooseEdgeLoopCapMode(edge));
     setSelectedLooseEdgeLoopActive(true);
     refreshLooseEdgeLoopCapVisibility();
+    setLooseEdgeLoopColor(edge.mesh, edge.loopId, selectedLooseEdgeLoopColor);
 
     const overlay = createLooseEdgeLoopOverlay(edge, selectedLooseEdgeLoopColor);
 
@@ -4462,7 +5291,11 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
     applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
     applyLinkedFaceSelectionColors(selection);
-    refreshSelectedObjectOutlines(modelRoot, hiddenObjectIdsRef.current, selection.objectId);
+    refreshSelectedObjectOutlines(
+      modelRoot,
+      hiddenObjectIdsRef.current,
+      selectedObjectIdsRef.current,
+    );
     clearLinkedFaceSelectionOverlay();
     clearSelectionBoundaryLoopOverlay();
 
@@ -4509,8 +5342,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
     if (clearObjectSelection) {
       rememberedTriangleSelectionRef.current = null;
-      selectedObjectIdRef.current = null;
-      setSelectedObjectId(null);
+      clearObjectSelectionState();
       setSeparateModeActiveState(false);
       setSeparationProgress(null);
       refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
@@ -4524,7 +5356,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       refreshSelectedObjectOutlines(
         modelRoot,
         hiddenObjectIdsRef.current,
-        selectedObjectIdRef.current,
+        selectedObjectIdsRef.current,
       );
       refreshLooseEdgeOverlays(
         modelRoot,
@@ -4532,6 +5364,79 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         selectedObjectIdRef.current,
         false,
       );
+      refreshLooseEdgeLoopDisplayColors(modelRoot);
+    }
+  };
+
+  const restoreViewerHistorySnapshot = (snapshot: ViewerHistorySnapshot) => {
+    const modelRoot = rootRef.current;
+
+    if (!modelRoot) {
+      return false;
+    }
+
+    clearSelectedLooseEdgeLoop();
+    clearLinkedFaceSelection(true, false);
+    clearLooseEdgeLoopCapStates();
+    rememberedTriangleSelectionRef.current = null;
+    setSeparateModeActiveState(false);
+    setSeparationProgress(null);
+    setLooseEdgeLoopMode("none");
+    setSelectedLooseEdgeLoopActive(false);
+    setLinkedFaceSelectionGraph(null);
+    setLinkedFaceSelection({
+      active: false,
+      count: 0,
+      threshold: linkedFaceSelectionThresholdRef.current,
+    });
+
+    const hadInvalidMeshState = applyViewerHistoryMeshStates(modelRoot, snapshot.meshes);
+
+    hiddenObjectIdsRef.current = new Set(snapshot.hiddenObjectIds);
+    objectNamesRef.current = { ...snapshot.objectNames };
+    nextSeparatedObjectIdRef.current = snapshot.nextObjectId;
+    clearObjectSelectionState();
+    refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+    applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
+    refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current);
+    refreshSelectedObjectOutlines(
+      modelRoot,
+      hiddenObjectIdsRef.current,
+      selectedObjectIdsRef.current,
+    );
+    refreshLooseEdgeOverlays(
+      modelRoot,
+      hiddenObjectIdsRef.current,
+      selectedObjectIdRef.current,
+      true,
+    );
+    const hadInvalidCapState = restoreLooseEdgeLoopCapStates(modelRoot, snapshot.loopCapStates);
+
+    refreshSeparatedObjects();
+    schedulePersistViewerState();
+
+    return hadInvalidMeshState || hadInvalidCapState;
+  };
+
+  const undoLastViewerAction = () => {
+    if (separationBusyRef.current) {
+      return;
+    }
+
+    const snapshot = historySnapshotsRef.current.pop();
+
+    setCanUndo(historySnapshotsRef.current.length > 0);
+
+    if (!snapshot) {
+      return;
+    }
+
+    const hadInvalidState = restoreViewerHistorySnapshot(snapshot);
+
+    setStatusText(currentModelSourceRef.current?.name ?? statusText);
+
+    if (hadInvalidState) {
+      showToast("Some history state could not be restored.");
     }
   };
 
@@ -4639,8 +5544,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
       linkedFaceSelectionRef.current = selection;
       linkedFaceSelectionCacheRef.current = cache;
-      selectedObjectIdRef.current = selection.objectId;
-      setSelectedObjectId(selection.objectId);
+      setObjectSelectionState(new Set([selection.objectId]), selection.objectId);
       refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
       refreshLooseEdgeOverlays(
         rootRef.current ?? selection.mesh,
@@ -4648,10 +5552,11 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         selection.objectId,
         false,
       );
+      refreshLooseEdgeLoopDisplayColors(rootRef.current ?? selection.mesh);
       refreshSelectedObjectOutlines(
         rootRef.current ?? selection.mesh,
         hiddenObjectIdsRef.current,
-        selection.objectId,
+        selectedObjectIdsRef.current,
       );
       setLinkedFaceSelectionGraph(cache);
       setLinkedFaceSelection({
@@ -4676,11 +5581,23 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     );
   };
 
-  const applyObjectVisibility = (nextHiddenObjectIds: Set<number>) => {
+  const applyObjectVisibility = (nextHiddenObjectIds: Set<number>, recordHistory = true) => {
     const modelRoot = rootRef.current;
     const selection = linkedFaceSelectionRef.current;
     const currentSelectedObjectId = selectedObjectIdRef.current;
     const selectedLooseEdgeLoop = selectedLooseEdgeLoopRef.current;
+    const visibilityChanged =
+      nextHiddenObjectIds.size !== hiddenObjectIdsRef.current.size ||
+      Array.from(nextHiddenObjectIds).some((objectId) => !hiddenObjectIdsRef.current.has(objectId));
+    const nextSelectedObjectIds = new Set(
+      Array.from(selectedObjectIdsRef.current).filter(
+        (objectId) => !nextHiddenObjectIds.has(objectId),
+      ),
+    );
+
+    if (recordHistory && visibilityChanged) {
+      pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+    }
 
     hiddenObjectIdsRef.current = nextHiddenObjectIds;
     refreshLooseEdgeLoopCapVisibility(nextHiddenObjectIds);
@@ -4706,10 +5623,14 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
     if (currentSelectedObjectId != null && nextHiddenObjectIds.has(currentSelectedObjectId)) {
       rememberedTriangleSelectionRef.current = null;
-      selectedObjectIdRef.current = null;
-      setSelectedObjectId(null);
+      setObjectSelectionState(
+        nextSelectedObjectIds,
+        nextSelectedObjectIds.values().next().value ?? null,
+      );
       setSeparateModeActiveState(false);
       setSeparationProgress(null);
+    } else if (nextSelectedObjectIds.size !== selectedObjectIdsRef.current.size) {
+      setObjectSelectionState(nextSelectedObjectIds, currentSelectedObjectId);
     }
 
     refreshLooseEdgeLoopCapVisibility(nextHiddenObjectIds);
@@ -4717,8 +5638,9 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     if (modelRoot) {
       refreshObjectMaterialGroups(modelRoot, nextHiddenObjectIds);
       refreshObjectWireframes(modelRoot, nextHiddenObjectIds);
-      refreshSelectedObjectOutlines(modelRoot, nextHiddenObjectIds, selectedObjectIdRef.current);
+      refreshSelectedObjectOutlines(modelRoot, nextHiddenObjectIds, selectedObjectIdsRef.current);
       refreshLooseEdgeOverlays(modelRoot, nextHiddenObjectIds, selectedObjectIdRef.current, false);
+      refreshLooseEdgeLoopDisplayColors(modelRoot);
       setSeparatedObjects(
         collectSeparatedObjects(modelRoot, nextHiddenObjectIds, objectNamesRef.current),
       );
@@ -4742,15 +5664,22 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   };
 
   const hideSelectedObject = () => {
-    const objectId = selectedObjectIdRef.current ?? linkedFaceSelectionRef.current?.objectId;
+    const selectedObjectIds =
+      selectedObjectIdsRef.current.size > 0
+        ? Array.from(selectedObjectIdsRef.current)
+        : linkedFaceSelectionRef.current?.objectId != null
+          ? [linkedFaceSelectionRef.current.objectId]
+          : [];
 
-    if (objectId == null) {
+    if (selectedObjectIds.length === 0) {
       return;
     }
 
     const nextHiddenObjectIds = new Set(hiddenObjectIdsRef.current);
 
-    nextHiddenObjectIds.add(objectId);
+    selectedObjectIds.forEach((objectId) => {
+      nextHiddenObjectIds.add(objectId);
+    });
     applyObjectVisibility(nextHiddenObjectIds);
   };
 
@@ -4762,23 +5691,97 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     applyObjectVisibility(new Set<number>());
   };
 
-  const selectSeparatedObject = (objectId: number) => {
+  const joinSelectedObjects = () => {
+    const modelRoot = rootRef.current;
+
+    if (!modelRoot || separationBusyRef.current || selectedObjectIdsRef.current.size < 2) {
+      return;
+    }
+
+    const plan = createSelectedObjectJoinPlan(
+      modelRoot,
+      selectedObjectIdsRef.current,
+      selectedObjectIdRef.current,
+    );
+
+    if (!plan) {
+      showToast("Selected objects do not share an edge.");
+      return;
+    }
+
+    const historySnapshot = createCurrentViewerHistorySnapshot();
+
+    clearSelectedLooseEdgeLoop();
+    clearLinkedFaceSelection(false, false);
+
+    if (!applySelectedObjectJoinPlan(modelRoot, plan)) {
+      showToast("Selected objects could not be joined.");
+      return;
+    }
+
+    pushViewerHistorySnapshot(historySnapshot);
+    plan.objectIdToTargetId.forEach((_targetObjectId, sourceObjectId) => {
+      hiddenObjectIdsRef.current.delete(sourceObjectId);
+      delete objectNamesRef.current[sourceObjectId];
+    });
+
+    const nextSelectedObjectIds = new Set(plan.targetObjectIds);
+    const currentObjectId = selectedObjectIdRef.current;
+    const nextPrimaryObjectId =
+      currentObjectId != null && nextSelectedObjectIds.has(currentObjectId)
+        ? currentObjectId
+        : (nextSelectedObjectIds.values().next().value ?? null);
+
+    rememberedTriangleSelectionRef.current = null;
+    setObjectSelectionState(nextSelectedObjectIds, nextPrimaryObjectId);
+    refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
+    refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+    applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
+    refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current);
+    refreshSelectedObjectOutlines(
+      modelRoot,
+      hiddenObjectIdsRef.current,
+      selectedObjectIdsRef.current,
+    );
+    refreshLooseEdgeOverlays(
+      modelRoot,
+      hiddenObjectIdsRef.current,
+      selectedObjectIdRef.current,
+      true,
+    );
+    syncLooseEdgeLoopCapStates(modelRoot);
+    refreshSeparatedObjects();
+    refreshLooseEdgeLoopDisplayColors(modelRoot);
+    setStatusText(`Joined ${plan.objectIdToTargetId.size + plan.targetObjectIds.size} objects`);
+    schedulePersistViewerState();
+  };
+
+  const selectSeparatedObject = (objectId: number, additive = false) => {
     if (separationBusyRef.current) {
       return;
     }
 
     const currentObjectId = selectedObjectIdRef.current;
+    const currentObjectIds = selectedObjectIdsRef.current;
     const hasLinkedFaceSelection = linkedFaceSelectionRef.current != null;
 
-    if (currentObjectId === objectId && !hasLinkedFaceSelection) {
+    if (
+      !additive &&
+      currentObjectId === objectId &&
+      currentObjectIds.size === 1 &&
+      currentObjectIds.has(objectId) &&
+      !hasLinkedFaceSelection
+    ) {
       return;
     }
 
     clearSelectedLooseEdgeLoop();
     clearLinkedFaceSelection(false, false);
     setSeparationProgress(null);
-    selectedObjectIdRef.current = objectId;
-    setSelectedObjectId(objectId);
+    const nextObjectIds = additive ? new Set(currentObjectIds) : new Set<number>();
+
+    nextObjectIds.add(objectId);
+    setObjectSelectionState(nextObjectIds, objectId);
     refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
 
     const modelRoot = rootRef.current;
@@ -4788,8 +5791,9 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
       }
 
-      refreshSelectedObjectOutlines(modelRoot, hiddenObjectIdsRef.current, objectId);
+      refreshSelectedObjectOutlines(modelRoot, hiddenObjectIdsRef.current, nextObjectIds);
       refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, objectId, false);
+      refreshLooseEdgeLoopDisplayColors(modelRoot);
     }
   };
 
@@ -4803,6 +5807,11 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       nextObjectNames[objectId] = trimmedName;
     }
 
+    if ((objectNamesRef.current[objectId] ?? "") === (nextObjectNames[objectId] ?? "")) {
+      return;
+    }
+
+    pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
     objectNamesRef.current = nextObjectNames;
     refreshSeparatedObjects();
     schedulePersistViewerState();
@@ -4841,6 +5850,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         return;
       }
 
+      pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
       nextSeparatedObjectIdRef.current += 1;
 
       for (let index = 0; index < selectedTriangleIndexes.length; index += 1) {
@@ -4884,7 +5894,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       refreshSelectedObjectOutlines(
         modelRoot,
         hiddenObjectIdsRef.current,
-        selectedObjectIdRef.current,
+        selectedObjectIdsRef.current,
       );
       refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
       syncLooseEdgeLoopCapStates(modelRoot);
@@ -4924,10 +5934,13 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     try {
       clearSelectedLooseEdgeLoop();
 
+      const historySnapshot = createCurrentViewerHistorySnapshot();
+
       if (!cutSelectionBoundaryLoopTopology(selection, boundaryLoop)) {
         return;
       }
 
+      pushViewerHistorySnapshot(historySnapshot);
       const topology = buildMeshTopology(selection.mesh);
 
       if (!topology) {
@@ -4967,7 +5980,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       refreshSelectedObjectOutlines(
         modelRoot,
         hiddenObjectIdsRef.current,
-        selectedObjectIdRef.current,
+        selectedObjectIdsRef.current,
       );
       refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
       syncLooseEdgeLoopCapStates(modelRoot);
@@ -5006,10 +6019,12 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     selectSeparatedObjectHandlerRef.current = selectSeparatedObject;
     schedulePersistViewerStateHandlerRef.current = schedulePersistViewerState;
     separateByBoundaryLoopHandlerRef.current = separateByBoundaryLoop;
+    getLooseEdgeLoopCapStateHandlerRef.current = getLooseEdgeLoopCapState;
     setLooseEdgeLoopCapOffsetHandlerRef.current = setLooseEdgeLoopCapOffset;
     setLooseEdgeLoopCapTargetHandlerRef.current = setLooseEdgeLoopCapTarget;
     showAllObjectsHandlerRef.current = showAllObjects;
     syncLooseEdgeLoopCapStatesHandlerRef.current = syncLooseEdgeLoopCapStates;
+    undoLastViewerActionHandlerRef.current = undoLastViewerAction;
   });
 
   const loadModelIntoViewer = async (
@@ -5058,7 +6073,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     refreshObjectMaterialGroups(model, hiddenObjectIdsRef.current);
     applyObjectColors(model, hiddenObjectIdsRef.current);
     refreshObjectWireframes(model, hiddenObjectIdsRef.current);
-    refreshSelectedObjectOutlines(model, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
+    refreshSelectedObjectOutlines(model, hiddenObjectIdsRef.current, selectedObjectIdsRef.current);
     refreshLooseEdgeOverlays(model, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
 
     if (persistedState) {
@@ -5249,7 +6264,23 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     capNormalTransformHelperRef.current = capNormalTransformHelper;
 
     const handleCapNormalTransformDragging = (event: { value: unknown }) => {
-      controls.enabled = event.value !== true;
+      const isDragging = event.value === true;
+
+      controls.enabled = !isDragging;
+
+      if (isDragging) {
+        capNormalTransformHistorySnapshotRef.current = createCurrentViewerHistorySnapshot();
+        capNormalTransformChangedRef.current = false;
+        return;
+      }
+
+      if (capNormalTransformChangedRef.current) {
+        pushViewerHistorySnapshot(capNormalTransformHistorySnapshotRef.current);
+        schedulePersistViewerStateHandlerRef.current?.();
+      }
+
+      capNormalTransformHistorySnapshotRef.current = null;
+      capNormalTransformChangedRef.current = false;
     };
 
     const handleCapNormalTransformChange = () => {
@@ -5267,6 +6298,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       const targetWorld = target.getWorldPosition(new THREE.Vector3());
       const targetLocal = edge.mesh.worldToLocal(targetWorld.clone());
 
+      capNormalTransformChangedRef.current = true;
       setLooseEdgeLoopCapTargetHandlerRef.current?.(edge, targetLocal);
     };
 
@@ -5289,7 +6321,15 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         currentEdge?.isLooseEdge &&
         !isSameLooseEdgeLoop(currentEdge, selectedLooseEdgeLoopRef.current)
       ) {
-        setLooseEdgeLoopColor(currentEdge.mesh, currentEdge.loopId, looseEdgeColor);
+        const loop = getLooseEdgeLoop(currentEdge.mesh, currentEdge.loopId);
+
+        if (loop) {
+          setLooseEdgeLoopColor(
+            currentEdge.mesh,
+            currentEdge.loopId,
+            getLooseEdgeLoopDisplayColor(currentEdge.mesh, loop, looseEdgeLoopCapStatesRef.current),
+          );
+        }
       }
 
       hoveredEdgeRef.current = null;
@@ -5337,12 +6377,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       });
     };
 
-    const getEdgeAtPointer = (event: PointerEvent) => {
-      const hit = getMeshHitAtPointer(event);
-      return hit ? getHoveredEdgeFromHit(hit) : null;
-    };
-
-    const getLooseEdgeAtPointer = (event: PointerEvent) => {
+    const getLooseEdgeAtPointer = (event: PointerEvent): HoveredEdge | null => {
       if (!isEdgeLoopCapToolEnabledRef.current) {
         return null;
       }
@@ -5366,7 +6401,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         }
 
         segmentsByKey.forEach((segment) => {
-          if (hiddenObjectIdsRef.current.has(segment.objectId)) {
+          if (segment.loopId < 0 || hiddenObjectIdsRef.current.has(segment.objectId)) {
             return;
           }
 
@@ -5414,7 +6449,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       return closestEdge;
     };
 
-    const getSelectionBoundaryEdgeAtPointer = (event: PointerEvent) => {
+    const getSelectionBoundaryEdgeAtPointer = (event: PointerEvent): HoveredEdge | null => {
       if (!isSeparationToolEnabledRef.current) {
         return null;
       }
@@ -5523,9 +6558,17 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         renderer.domElement.releasePointerCapture(drag.pointerId);
       }
 
+      const dragState = getLooseEdgeLoopCapStateHandlerRef.current?.(drag.edge) ?? null;
+      const offsetChanged =
+        dragState != null && Math.abs(dragState.offset - drag.startOffset) >= 0.0001;
+
       capOffsetDragRef.current = null;
       controls.enabled = true;
-      schedulePersistViewerStateHandlerRef.current?.();
+
+      if (offsetChanged) {
+        pushViewerHistorySnapshot(drag.historySnapshot);
+        schedulePersistViewerStateHandlerRef.current?.();
+      }
 
       return true;
     };
@@ -5546,8 +6589,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         return null;
       }
 
-      const key = getLooseEdgeLoopFillKey(edge);
-      const state = looseEdgeLoopCapStatesRef.current.get(key);
+      const state = getLooseEdgeLoopCapStateHandlerRef.current?.(edge) ?? null;
       const axisData = state
         ? getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget)
         : null;
@@ -5561,6 +6603,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       edge.mesh.updateMatrixWorld(true);
 
       const targetOffset = axisData.axis.clone().multiplyScalar(state.offset);
+      const arrowDirection =
+        targetOffset.lengthSq() > 0 ? targetOffset.clone().normalize() : axisData.axis.clone();
       const loopSize = new THREE.Box3()
         .setFromPoints(axisData.data.points)
         .getSize(new THREE.Vector3());
@@ -5577,7 +6621,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       );
       const endScreen = getScreenPoint(
         edge.mesh.localToWorld(
-          axisData.data.center.clone().addScaledVector(axisData.axis, visualLength),
+          axisData.data.center.clone().addScaledVector(arrowDirection, visualLength),
         ),
         camera,
         rect,
@@ -5615,6 +6659,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
       return {
         edge,
+        historySnapshot: createCurrentViewerHistorySnapshot(),
+        offsetDirection: state.offset < 0 ? -1 : 1,
         pixelsPerOffsetUnit,
         pointerId: event.pointerId,
         screenAxis,
@@ -5642,7 +6688,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
       setLooseEdgeLoopCapOffsetHandlerRef.current?.(
         drag.edge,
-        drag.startOffset + deltaPixels / drag.pixelsPerOffsetUnit,
+        drag.startOffset + (drag.offsetDirection * deltaPixels) / drag.pixelsPerOffsetUnit,
       );
       event.preventDefault();
 
@@ -5685,20 +6731,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         y: event.clientY,
       };
 
-      if (!event.shiftKey) {
-        clearHoveredEdge();
-        return;
-      }
-
-      const edge = getEdgeAtPointer(event);
-
       clearHoveredEdge();
-
-      if (!edge) {
-        return;
-      }
-
-      setHoveredEdge(edge);
     };
 
     const handlePointerUp = (event: PointerEvent) => {
@@ -5757,30 +6790,17 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         return;
       }
 
-      const edge = hoveredEdgeRef.current ?? getEdgeAtPointer(event);
-
-      if (!edge) {
-        return;
-      }
-
-      if (!swapHoveredEdgeDiagonal(edge)) {
-        return;
-      }
-
       clearHoveredEdge();
-      clearSelectedLooseEdgeLoopHandlerRef.current?.();
-      clearLinkedFaceSelectionHandlerRef.current?.();
-      refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
-      applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
-      refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current);
-      refreshSelectedObjectOutlines(
-        modelRoot,
-        hiddenObjectIdsRef.current,
-        selectedObjectIdRef.current,
-      );
-      refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
-      syncLooseEdgeLoopCapStatesHandlerRef.current?.(modelRoot);
-      schedulePersistViewerStateHandlerRef.current?.();
+      const triangle = getTriangleAtPointer(event);
+
+      if (!triangle) {
+        return;
+      }
+
+      const objectId = getTriangleObjectId(triangle.mesh, triangle.triangleIndex);
+
+      rememberTriangleSelection(triangle.mesh, triangle.triangleIndex);
+      selectSeparatedObjectHandlerRef.current?.(objectId, true);
     };
 
     const handlePointerMove = (event: PointerEvent) => {
@@ -5794,7 +6814,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       }
 
       const edge = event.shiftKey
-        ? getEdgeAtPointer(event)
+        ? null
         : (getSelectionBoundaryEdgeAtPointer(event) ?? getLooseEdgeAtPointer(event));
       const currentEdge = hoveredEdgeRef.current;
 
@@ -5833,12 +6853,26 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     };
 
     const handleKeyUp = (event: KeyboardEvent) => {
+      if (isEditableHotkeyEvent(event)) {
+        return;
+      }
+
       if (event.key === "Shift") {
         clearHoveredEdge();
       }
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (isEditableHotkeyEvent(event)) {
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        undoLastViewerActionHandlerRef.current?.();
+        return;
+      }
+
       if (event.key.toLowerCase() !== "h") {
         return;
       }
@@ -6018,6 +7052,61 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }
   };
 
+  const exportBlenderGlb = async () => {
+    const modelRoot = rootRef.current;
+    const source = currentModelSourceRef.current;
+
+    if (exportBusy) {
+      return;
+    }
+
+    if (!modelRoot || !source || loadState !== "ready") {
+      showToast("Load a GLB before exporting.");
+      return;
+    }
+
+    let exportScene: THREE.Scene | null = null;
+    const exportFileName = getBlenderExportFileName(source.name);
+
+    setExportBusy(true);
+    setStatusText(`Exporting ${exportFileName}`);
+
+    try {
+      exportScene = createBlenderExportScene(
+        modelRoot,
+        objectNamesRef.current,
+        looseEdgeLoopCapStatesRef.current,
+      );
+
+      if (exportScene.children.length === 0) {
+        throw new Error("Export scene is empty");
+      }
+
+      const result = await new GLTFExporter().parseAsync(exportScene, {
+        binary: true,
+        forceIndices: true,
+        onlyVisible: false,
+      });
+
+      if (!(result instanceof ArrayBuffer)) {
+        throw new Error("GLB exporter returned JSON");
+      }
+
+      downloadArrayBuffer(result, exportFileName, "model/gltf-binary");
+      setStatusText(`Exported ${exportFileName}`);
+    } catch (error) {
+      console.error(`Could not export GLB "${exportFileName}"`, error);
+      setStatusText("Could not export GLB");
+      showToast("Could not export GLB. Check the console for details.");
+    } finally {
+      if (exportScene) {
+        disposeObject(exportScene);
+      }
+
+      setExportBusy(false);
+    }
+  };
+
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.currentTarget.value = "";
@@ -6029,6 +7118,13 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     void openGlbFile(file);
   };
 
+  const objectListSelectedIds =
+    selectedObjectIds.size > 0
+      ? selectedObjectIds
+      : selectedLooseEdgeLoopActive && selectedLooseEdgeLoopRef.current
+        ? new Set([selectedLooseEdgeLoopRef.current.objectId])
+        : new Set<number>();
+
   return (
     <main className="fixed inset-0 overflow-hidden bg-neutral-200 text-neutral-950">
       <div
@@ -6038,14 +7134,20 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       />
 
       <TopBar
+        canExport={loadState === "ready" && currentModelSourceRef.current !== null}
+        canUndo={canUndo && loadState === "ready" && !separationBusy}
+        exportBusy={exportBusy}
         inputRef={inputRef}
         loadState={loadState}
         statusText={statusText}
+        onExportGlb={exportBlenderGlb}
         onFileChange={handleFileChange}
+        onUndo={undoLastViewerAction}
       />
       <ObjectsPanel
         objects={separatedObjects}
-        selectedObjectId={selectedObjectId}
+        selectedObjectIds={objectListSelectedIds}
+        onJoinSelectedObjects={joinSelectedObjects}
         onRenameObject={renameSeparatedObject}
         onSelectObject={selectSeparatedObject}
         onToggleVisibility={toggleObjectVisibility}
