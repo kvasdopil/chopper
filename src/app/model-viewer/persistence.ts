@@ -23,6 +23,7 @@ export type PersistedMeshState = {
 };
 
 export type PersistedLoopCapState = {
+  cone?: boolean;
   meshIndex: number;
   mode: LooseEdgeLoopMode;
   normalTarget: [number, number, number] | null;

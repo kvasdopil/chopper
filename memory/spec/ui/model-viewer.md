@@ -10,7 +10,12 @@ Related documents:
 - [Specifications index](../index.md): Parent catalog for all normative requirements. Read this when deciding whether a rule belongs in UI, domain, project, or testing docs.
 - [Memory Bank principles](../../mbb/principles.md): Governance for single-source-of-truth documentation. Read this before splitting or duplicating viewer behavior.
 - [Viewer entry](../../../src/app/page.tsx): Thin app route that composes the model viewer with the default tool list. Use this when adding or removing whole viewer tools.
-- [Viewer component](../../../src/app/model-viewer/model-viewer.tsx): Current implementation of geometry, selection, separation, and viewport state. Use this as the source of truth for implementation details.
+- [Viewer component](../../../src/app/model-viewer/model-viewer.tsx): Top-level React composition for viewer refs/state, model load/restore/export flow, and control composition. Use this when changing the app-level viewer shell.
+- [Viewer scene hook](../../../src/app/model-viewer/model-viewer-scene.ts): Three.js scene lifecycle, camera/renderer setup, pointer handling, hotkeys, resize, render loop, and teardown. Use this when changing low-level viewport interaction wiring.
+- [Viewer loop cap hook](../../../src/app/model-viewer/model-viewer-loop-caps.ts): Stateful loop cap/extrusion/cylinder selection, generated fill meshes, paired loop edits, and viewport cap gizmos. Use this when changing loop generation interaction state.
+- [Viewer selection hook](../../../src/app/model-viewer/model-viewer-selection.ts): Object selection, linked-face selection, separate mode, visibility, join, undo restore, and separation actions. Use this when changing object/separation workflows.
+- [Viewer core barrel](../../../src/app/model-viewer/model-viewer-core.ts): Re-export surface for stateless viewer modules. Use this only as the compatibility import boundary.
+- [Viewer stateless modules](../../../src/app/model-viewer): Focused helper modules for shared types/constants, materials, overlays, loose edges, loop cap geometry, mesh topology, linked-face selection, persistence snapshots, and export. Use the narrow module that owns the algorithm being changed.
 - [Viewer persistence](../../../src/app/model-viewer/persistence.ts): IndexedDB storage helper for the current viewer snapshot. Use this when changing refresh survival or saved viewer state.
 - [Viewer tools](../../../src/app/model-viewer/tools): Tool registry and tool-owned panel adapters. Use this when adding, removing, or disabling feature tools.
 - [Viewer controls](../../../src/app/viewer-controls): Current TSX control components for the load/status bar, object list, and linked-face panel. Use this when changing UI presentation.
@@ -19,27 +24,28 @@ Related documents:
 
 - The app displays a full-screen Three.js viewport for `.glb` files.
 - Loading a GLB normalizes the model to fit the viewer and frames the camera around the model.
-- The app persists one current viewer snapshot in IndexedDB so a browser refresh restores the active GLB and durable user edits. The persisted snapshot contains the source GLB bytes plus only state needed to rebuild user edits: separated object IDs, object names, hidden object IDs, next object ID, topology-cut IDs, mesh position buffers only for meshes whose positions were edited, and per-loop cap/extrusion/cylinder mode/offset/normal-target data. Runtime-only state such as camera position, orbit target, hover state, selection state, separation progress, and generated overlay mesh instances is not persisted.
+- The app persists one current viewer snapshot in IndexedDB so a browser refresh restores the active GLB and durable user edits. The persisted snapshot contains the source GLB bytes plus only state needed to rebuild user edits: separated object IDs, object names, hidden object IDs, next object ID, topology-cut IDs, mesh position buffers only for meshes whose positions were edited, and per-loop cap/extrusion/cylinder mode/offset/normal-target/cone data. Runtime-only state such as camera position, orbit target, hover state, selection state, separation progress, and generated overlay mesh instances is not persisted.
 - Opening a new valid `.glb` resets the saved snapshot before parsing the new file. If the new load fails, the previous saved file must not be restored on the next refresh.
 - Loading, restore, and persistence failures keep the viewer from silently failing. User-facing failures update the status text where applicable and show a toast.
-- The viewer keeps an in-memory undo history for durable edit actions until a new file is loaded or the page is reloaded. Undo history is not persisted. `Undo` and `Command/Ctrl+Z` roll back one action at a time, including object visibility/name changes, separation and boundary-cut topology changes, and loop cap/extrusion/cylinder mode or offset changes.
-- The top bar provides an `Export GLB` action when a model is loaded. Export builds a temporary Blender-oriented GLB scene instead of exporting the live viewport scene. Each separated object ID becomes a standalone mesh with its object label and color. Generated cap/extrusion/cylinder geometry is merged into the matching object mesh and stored as separate GLB material groups/primitives where the format supports it. UI-only overlays such as wireframes, hover lines, selected-object outlines, loose-edge overlays, and transform gizmos are excluded. Export includes hidden objects and hidden generated caps because hidden state is a runtime view concern, not export geometry.
+- The viewer keeps an in-memory undo history for durable edit actions until a new file is loaded or the page is reloaded. Undo history is not persisted. `Undo` and `Command/Ctrl+Z` roll back one action at a time, including object visibility/name changes, separation and boundary-cut topology changes, and loop cap/extrusion/cylinder mode, cone, or offset changes.
+- The top bar provides an `Export GLB` action when a model is loaded. Export builds a temporary Blender-oriented GLB scene instead of exporting the live viewport scene. Each separated object ID becomes a standalone mesh with its object label and color. Generated cap/extrusion/cylinder geometry is merged into the matching object mesh and stored as separate GLB material groups/primitives where the format supports it. Export welds matching vertex positions with a `0.00001` world-unit merge distance and skips triangles that become degenerate after welding. UI-only overlays such as wireframes, hover lines, selected-object outlines, loose-edge overlays, and transform gizmos are excluded. Export includes hidden objects and hidden generated caps because hidden state is a runtime view concern, not export geometry.
 - The viewer renders front-facing triangles only.
 - Default faces are light gray; separated objects use distinct pronounced colors.
-- Wireframes are thin, dark gray, nearly transparent line segments.
+- A standalone texture toggle sits immediately to the left of the object panel. It is enabled only when the loaded GLB contains base color texture maps. Textures are hidden by default and are runtime-only view state, not persisted. Showing textures reuses the original GLB base color maps without vertex-color object tinting while preserving object visibility. Object/mesh rows, counts, join, visibility toggles, and inline names remain visible in the object panel.
+- Wireframes are visible only while separate mode is active. They are thin, dark gray, nearly transparent line segments.
 - Loose edges render only for the currently selected object. They are defined as edges connected to exactly one triangle within that visible object and render above other edge overlays. Unobstructed loose edges render as thick `3px` lines; obstructed loose edges render as thinner `1px` lines. Loose-edge contact spans with no cap/extrusion/cylinder state render red, and contact spans with a cap/extrusion/cylinder state render green.
 - Hovering within `5px` of an unobstructed loose edge on any visible submesh temporarily highlights that edge's connected loose-edge contact span with a pronounced yellow `6px` UI overlay rendered above model geometry. Loose-edge contact spans are precomputed when the loose-edge overlay is rebuilt: loose-edge components are kept object-scoped, connected by topology-free vertex positions so topology cuts do not fragment one visual boundary, pruned to closed cycle cores by stripping dangling/open edge branches, then split into connected runs with the same topology-free contact ownership. Hover uses the cached span positions without rebuilding topology. Loose-edge segments that are not part of a closed cycle core remain outside span hover, selection, and cap generation.
 - Clicking a hovered loose-edge contact span selects that span, clears any selected mesh/object state, and displays it with a yellow `4px` UI overlay. Loose-edge contact-span hover and selection work on any visible submesh, even when the red/green loose-edge overlay is only visible for the currently selected object.
-- When a loose-edge contact span is selected, the loop panel appears. Cap/extrusion mode is stored per contact span. The default mode is `None`. Open contact spans are force-closed for generated cap/extrusion/cylinder geometry by adding virtual closing segments between open endpoints; this does not change source mesh topology. `Filled` mode creates an ephemeral, non-selectable cap mesh from the loop's unique points plus a center point, with triangles from the center to each real or virtual loop segment. `Ex. X`, `Ex. Y`, `Ex. Z`, and `Ex. N` create ephemeral, non-selectable extrusions from the loop along the signed local X, Y, Z, or loop-normal axis, using an extrusion length equal to the parent object's projected size along that axis, then add an end cap perpendicular to the extrusion axis. `Cyl. X`, `Cyl. Y`, `Cyl. Z`, and `Cyl. N` create the same simple cap plus a 16-sided cylinder centered on the loop center and oriented along the matching X, Y, Z, or loop-normal axis. Cylinder radius is `80%` of the minimum distance from the loop center to a loop vertex. Cap, extrusion, and cylinder triangles are wound so their front faces point outside the parent object, but generated materials render double-sided so incorrect normals do not hide the generated faces. Generated caps/extrusions/cylinders use the parent object's face color, do not appear in the object list, remain visible after loop selection is cleared, and follow the parent object's visibility.
-- If a loose-edge contact span has exactly one matching span on another object with the same topology-free boundary segments, the two spans are treated as one paired boundary for cap/extrusion/cylinder edits. Changing mode, offset, or `Normal` target on either side updates generated geometry for both objects. Each object still owns its own generated mesh for visibility/export/material grouping, and paired members store a shared world-space cap axis as local target points so generated halves stay aligned from the shared boundary.
+- When a loose-edge contact span is selected, the loop panel appears. Cap/extrusion mode is stored per contact span. The default mode is `None`. Open contact spans are force-closed for generated cap/extrusion/cylinder geometry by adding virtual closing segments between open endpoints; this does not change source mesh topology. `Filled` mode creates an ephemeral, non-selectable cap mesh from the loop's unique points plus a center point, with triangles from the center to each real or virtual loop segment. `Ex. X`, `Ex. Y`, `Ex. Z`, and `Ex. N` create ephemeral, non-selectable extrusions from the loop along the signed local X, Y, Z, or loop-normal axis, using an extrusion length equal to the parent object's projected size along that axis, then add an end cap perpendicular to the extrusion axis. `Cyl. X`, `Cyl. Y`, `Cyl. Z`, and `Cyl. N` create loop-shaped cylinders by scaling the original loop points to `50%` around the loop centroid, projecting the scaled base ring onto a plane perpendicular to the active axis, extruding that flat scaled loop along the matching X, Y, Z, or loop-normal axis, and adding a flat end cap. With cone enabled, the first half of the cylinder offset slopes from the original loop to the flat scaled loop before continuing straight. Cap, extrusion, and cylinder triangles are wound so their front faces point outside the parent object, but generated materials render double-sided so incorrect normals do not hide the generated faces. Generated caps/extrusions/cylinders use the parent object's face color, do not appear in the object list, remain visible after loop selection is cleared, and follow the parent object's visibility.
+- If a loose-edge contact span has exactly one matching span on another object with the same topology-free boundary segments, the two spans are treated as one paired boundary for cap/extrusion/cylinder edits. Changing mode, cone, offset, or `Normal` target on either side updates generated geometry for both objects. Each object still owns its own generated mesh for visibility/export/material grouping, and paired members store a shared world-space cap axis as local target points so generated halves stay aligned from the shared boundary.
 - When any object or loose-edge contact span is selected, visible generated cap/extrusion/cylinder meshes keep their normal opaque rendering for unobstructed fragments and add a shared-geometry occlusion overlay for obstructed fragments. The occlusion overlay renders at `30%` opacity, uses a greater-depth test, and skips pixels already marked by the generated mesh stencil so only model-obstructed fragments show through. This is a material/render-state change only; generated geometry is not rebuilt for overlay display.
-- Each cap/extrusion/cylinder stores a per-loop signed offset along its active cap axis, so extrusion and cylinder generation can extend from the loop in either direction. `Filled` stays at offset `0` along the loop normal and does not display a viewport gizmo; extrusion and cylinder modes default to the object projected size along the selected axis, falling back to a small loop-sized offset when that projection is degenerate. While the loop is selected and its cap mode is `Ex. X`, `Ex. Y`, `Ex. Z`, `Cyl. X`, `Cyl. Y`, or `Cyl. Z`, a non-selectable `THREE.ArrowHelper` viewport gizmo appears on the signed cap offset side. Dragging near the visible arrow updates the stored offset and regenerates that loop's generated mesh; force-closed contact spans use a wider arrow hit target so the drag is captured before camera orbit starts. Dragging elsewhere keeps camera orbit/pan behavior. For `Ex. N` and `Cyl. N`, a standard three-axis `TransformControls` translate gizmo appears at the normal-axis target instead; the axis points from the loop centroid toward that target, defaults to the loop normal, and updates as the target is moved along any world axis.
-- The loop panel is positioned at the top-left below the load/status controls. It presents loop generation as two controls: `Mode` (`None`, `Cap`, `Extrude`, `Cylinder`) and `Axis` (`X`, `Y`, `Z`, `Normal`). Axis is enabled only for `Extrude` and `Cylinder`; `Cap` maps to the simple filled-cap mode.
+- Each cap/extrusion/cylinder stores a per-loop signed offset along its active cap axis, so extrusion and cylinder generation can extend from the loop in either direction. Cylinder modes also store a per-loop cone flag. `Filled` stays at offset `0` along the loop normal and does not display a viewport gizmo; extrusion and cylinder modes default to the object projected size along the selected axis, falling back to a small loop-sized offset when that projection is degenerate. While the loop is selected and its cap mode is `Ex. X`, `Ex. Y`, `Ex. Z`, `Cyl. X`, `Cyl. Y`, or `Cyl. Z`, a non-selectable `THREE.ArrowHelper` viewport gizmo appears on the signed cap offset side. Dragging near the visible arrow updates the stored offset and regenerates that loop's generated mesh; force-closed contact spans use a wider arrow hit target so the drag is captured before camera orbit starts. Dragging elsewhere keeps camera orbit/pan behavior. For `Ex. N` and `Cyl. N`, a standard three-axis `TransformControls` translate gizmo appears at the normal-axis target instead; the axis points from the loop centroid toward that target, defaults to the loop normal, and updates as the target is moved along any world axis.
+- The loop panel is positioned at the top-left below the load/status controls. It presents loop generation as three controls: `Mode` (`N`, `Cap`, `Ex`, `Cyl`), `Axis` (`X`, `Y`, `Z`, `N`), and a `Cone` checkbox enabled only for cylinder modes. Axis is enabled only for `Ex` and `Cyl`; `Cap` maps to the simple filled-cap mode.
 - Rebuilding loose-edge groups after mesh topology changes updates cap/extrusion state by stable contact-span segment keys. Cap/extrusion meshes are computed lazily only when the user selects a non-`None` loop mode; grouping loose edges must not eagerly create cap/extrusion meshes.
 - Hidden objects must not render faces, wireframe lines, or loose-edge lines and must be excluded from pointer picking.
 - Camera orbit uses `OrbitControls`; panning moves the current focus point and rotation stays around that focus.
-- The route composes the viewer as `<ModelViewer tools={defaultViewerTools} />`. Generic viewport responsibilities stay in `ModelViewer`: camera/renderer lifecycle, GLB load/restore, object selection, object visibility, object list, top bar, status, toasts, and shared mesh refresh operations. Feature surfaces are registered by `ViewerTool` ID.
-- The default tool registry contains `separation` and `edge-loop-cap`. Removing a tool from `defaultViewerTools` hides its panel and makes its pointer/state handlers inert. Current tool modules own their panels through small adapters; the heavier geometry algorithms still live in `ModelViewer` until a later extraction can move them safely behind richer tool contracts.
+- The route composes the viewer as `<ModelViewer tools={defaultViewerTools} />`. `ModelViewer` owns the app-level shell, durable refs/state, load/restore/export flow, top bar, object list, status, toasts, and tool panel composition. Three.js scene lifecycle lives in `model-viewer-scene.ts`, loop-cap interaction state lives in `model-viewer-loop-caps.ts`, and object/separation interaction state lives in `model-viewer-selection.ts`. Stateless viewer infrastructure is split across focused modules behind the `model-viewer-core.ts` barrel: shared constants/types, geometry/material helpers, overlay builders, separation algorithms, persistence snapshot helpers, and export helpers.
+- The default tool registry contains `separation` and `edge-loop-cap`. Removing a tool from `defaultViewerTools` hides its panel and makes its pointer/state handlers inert. Current tool modules own their panels through small adapters; feature interaction hooks own stateful behavior; stateless algorithms stay in the focused helper module that matches their domain until richer tool contracts justify moving them behind tool-owned APIs.
 - The viewer does not own a dev-server lifecycle in documentation or code workflows; the user launches the server when needed.
 
 ## Object Workflow
@@ -54,7 +60,7 @@ Related documents:
 - Clicking a mesh face remembers that triangle as the selected object's latest separation origin. If the user later toggles separate mode for the same object and the triangle still belongs to it, linked-face selection starts from that remembered triangle.
 - Clicking the already selected object outside separate mode must not recalculate linked-face selection or rebuild loose-edge topology.
 - Selecting a different mesh/object must use cached geometry data where possible. Plain object selection must not recolor all faces or rebuild loose-edge topology; face colors are refreshed only when clearing an active linked-face mask, and loose-edge rendering uses per-object cached line data.
-- Selected objects render a thin yellow `2px` screen-space silhouette outline around the outside contour, including closed meshes that have no open boundary edges. The viewer renders the normal scene first, then uses shared-geometry shader passes: a visible-surface stencil mask for selected objects, followed by a clip-space expanded outline pass that depth-tests behind selected model surfaces and is masked out over selected visible face areas.
+- Visible non-focused objects render a light gray `2px` outline. The outside contour uses the shared-geometry screen-space silhouette shader pass, and per-object mesh boundaries are drawn in the existing face material shader from boundary attributes, without adding boundary-line geometry. Selected objects render a yellow `2px` screen-space silhouette outline instead. The parent object of a selected loose-edge contact span is treated as focused, so it does not also receive the gray outline.
 - Mesh/object selection and loop selection are mutually exclusive: selecting a mesh/object clears loop selection, and selecting a loop clears mesh/object selection. Shift-click does not select loops. While a loop is selected, the object list highlights the loop's parent object row as contextual focus without making it the active selected object.
 - Clicking a triangle, clicking background, or selecting an object row clears loose-edge contact-span selection.
 - The eye icon toggles object visibility.
@@ -73,7 +79,7 @@ Related documents:
 - The seed triangle is always included in the selection.
 - Selection expands across adjacent triangles while the edge normal angle is within the active threshold.
 - Selected faces and their boundary lines render in yellow.
-- While a separate-mode mask is visible, separable boundary edge loops render in red and are hoverable. A separable boundary edge must have exactly two connected triangles, with one triangle inside the mask and one outside it. Hovering a boundary loop highlights the whole loop in blue.
+- While a separate-mode mask is visible, newly separable boundary edge loops render in red and are hoverable. Existing loose-edge contact spans are not hoverable in separate mode. A separable boundary edge must have exactly two connected triangles, with one triangle inside the mask and one outside it. Hovering a boundary loop highlights the whole loop in blue.
 - Clicking a hovered mask boundary loop cuts topology through that boundary loop without moving visible vertices or assigning the whole selected mask to a new object. After the cut, the affected object is scanned for loose connected components and any separable loose components are isolated into object IDs.
 - The linked-face panel displays a graph of selected polygon count by threshold in `0.1` degree intervals.
 - The graph is clickable. Clicking maps the horizontal click position to the nearest `0.1` degree threshold and recalculates the linked-face selection.
@@ -92,7 +98,7 @@ Related documents:
 
 ## Function Inventory
 
-This inventory describes responsibilities, not implementation details. Code remains the source of truth for exact algorithms.
+This inventory describes responsibilities, not implementation details. Code remains the source of truth for exact algorithms. Stateless helper functions live in focused `src/app/model-viewer/*` modules re-exported by `model-viewer-core.ts`; `model-viewer.tsx` and its hooks own React state/event orchestration.
 
 ### Viewer Page Utilities
 
@@ -131,17 +137,26 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `getTriangleEdges`: builds edge-to-face topology and per-triangle edge keys.
 - `getSignedEdgeNormalAngle`: computes signed normal angle for an edge shared by one or more faces.
 - `getEdgeNormalAngle`: returns the absolute normal angle for an edge.
-- `createFaceMaterial`: creates the front-side vertex-color material used for object faces.
-- `createSelectedObjectStencilMaterial`: creates the shader material that writes the focused object's visible face area into the stencil buffer.
-- `createSelectedObjectOutlineMaterial`: creates the shader material that draws the focused object's screen-space silhouette outline.
-- `refreshMeshObjectMaterialGroups`: rebuilds geometry groups and material visibility by object ID.
+- `getMaterialTextureMap`: reads a base color texture map from a Three.js material when present.
+- `getMaterialTextureMaps`: collects source material texture maps from one mesh material or material array.
+- `getSourceTriangleMaterialIndexes`: records the source material index for each triangle before styling clears geometry groups.
+- `getMeshSourceTextureMap`: resolves the preserved source texture map for one styled mesh material index.
+- `meshHasSourceTextureMaps`: detects whether one styled mesh retained any source texture maps.
+- `modelHasSourceTextureMaps`: detects whether the loaded model can enable the texture toggle.
+- `refreshObjectBoundaryAttributes`: marks open triangle edges and edges shared by different object IDs so the face shader can draw non-focused mesh boundaries without extra line geometry.
+- `createFaceMaterial`: creates the front-side material used for object faces, using vertex colors for color view, disabling vertex colors for preserved source texture maps, and mixing in shader-only non-focused boundary outlines.
+- `createSelectedObjectStencilMaterial`: creates the shader material that writes an outlined object's visible face area into the stencil buffer.
+- `createSelectedObjectOutlineMaterial`: creates the shader material that draws a screen-space silhouette outline for selected or non-focused objects.
+- `refreshMeshObjectMaterialGroups`: rebuilds geometry groups and material visibility by object ID and source texture material index.
 - `refreshObjectMaterialGroups`: refreshes material groups for all selectable meshes in a model.
-- `styleModel`: converts meshes to non-indexed geometry, initializes colors/object IDs, materials, wireframes, and hover overlays.
+- `styleModel`: converts meshes to non-indexed geometry, preserves source texture maps/material indexes, initializes colors/object IDs, materials, wireframes, and hover overlays.
 - `createObjectWireframeGeometry`: builds visible-object wireframe line segments from triangle positions.
-- `refreshObjectWireframe`: rebuilds one mesh wireframe after visibility or geometry changes.
-- `refreshObjectWireframes`: rebuilds wireframes for all selectable meshes in a model.
-- `refreshSelectedObjectOutlineOverlay`: updates one mesh's selected-object stencil and outline shader visibility/uniforms.
-- `refreshSelectedObjectOutlines`: refreshes selected-object outlines for all selectable meshes in a model.
+- `refreshObjectWireframe`: rebuilds one mesh wireframe after visibility or geometry changes and applies separate-mode visibility.
+- `refreshObjectWireframes`: rebuilds wireframes for all selectable meshes in a model and applies separate-mode visibility.
+- `applyObjectIdOutlineUniforms`: updates one outline overlay pair's object-ID uniforms and visibility.
+- `refreshObjectBoundaryMaterialUniforms`: toggles face-material boundary outline uniforms off for focused object IDs.
+- `refreshObjectOutlineOverlay`: updates one mesh's gray non-focused and yellow selected-object outline shader visibility/uniforms.
+- `refreshObjectOutlines`: refreshes object outlines for all selectable meshes in a model.
 - `getClosedLooseEdgeLoopKeys`: strips dangling/open loose-edge branches from one connected loose-edge component, using topology-free vertex-position continuity, so only closed cycle-core segments can become contact spans.
 - `getLooseEdgePositionEdgeKey`: creates the topology-free edge key used to detect contact across topology cuts.
 - `getLooseEdgeContactKey`: creates a stable contact ownership key from adjacent object IDs.
@@ -184,9 +199,8 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `createLooseEdgeLoopFlatFillGeometry`: creates the flat fan cap geometry for `Filled` mode.
 - `getLooseEdgeLoopExtrusionAxis`: resolves the signed local X/Y/Z/normal extrusion axis for a loop mode.
 - `createLooseEdgeLoopExtrusionGeometry`: creates side-wall and perpendicular end-cap geometry for extrusion loop modes.
-- `getLooseEdgeLoopCylinderRadius`: computes cylinder radius from the minimum loop-center-to-vertex distance.
-- `getPerpendicularBasis`: computes the local basis used to build cylinder rings around an axis.
-- `createLooseEdgeLoopCylinderGeometry`: creates the flat cap, 16 cylinder side faces, and cylinder top cap for cylinder loop modes.
+- `getLoopPointsProjectedToAxisPlane`: projects loop points to a flat plane perpendicular to the active cap axis.
+- `createLooseEdgeLoopCylinderGeometry`: creates loop-shaped cylinder geometry from the original loop scaled to `50%` around its centroid, with optional cone walls from the original loop to the scaled loop.
 - `createLooseEdgeLoopFill`: creates an ephemeral non-selectable cap, extrusion, or cylinder mesh for a loose-edge contact span, with outward-facing triangle winding.
 - `updateHoverEdgeResolution`: updates fat-line material resolution for hover and linked-face overlays.
 - `buildMeshTopology`: builds triangle and edge adjacency for a mesh.
@@ -234,7 +248,8 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `appendExportGeometryPositions`: appends transformed triangle positions from a buffer geometry.
 - `addBaseObjectGeometryToExportObjects`: converts triangle object IDs into base geometry buckets.
 - `addGeneratedLoopGeometryToExportObjects`: appends generated cap/extrusion/cylinder geometry to the matching object buckets as separate groups.
-- `createMergedExportMesh`: creates one exported mesh per object with base and generated material groups.
+- `getExportMergeVertexKey`: creates the precision-rounded vertex key used to weld duplicate positions in exported meshes.
+- `createMergedExportMesh`: creates one indexed exported mesh per object with welded vertices, skipped degenerate triangles, and base/generated material groups.
 - `addMergedObjectMeshesToExportScene`: adds one merged export mesh per object to the temporary export scene.
 - `createBlenderExportScene`: builds the temporary GLB scene that excludes viewport-only overlays.
 - `downloadArrayBuffer`: downloads the binary GLB result in the browser.
@@ -263,16 +278,20 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `getLoopWorldAxis`: converts a loop-local cap axis to world space.
 - `getMirroredLoopNormalTarget`: converts the selected loop's world-space cap axis into each paired loop's local target point.
 - `refreshCapOffsetGizmo`: creates, updates, or hides the selected-loop cap offset gizmo from the current cap state, using an arrow helper for fixed-axis extrusions and a three-axis translate gizmo for `Ex. N`; `Filled` mode has no gizmo.
-- `rebuildLooseEdgeLoopCapFill`: regenerates a cap/extrusion mesh after the mode or offset changes.
+- `rebuildLooseEdgeLoopCapFill`: regenerates a cap/extrusion mesh after the mode, cone flag, or offset changes.
 - `syncLooseEdgeLoopCapStates`: reconciles per-loop cap state against the latest grouped loose-edge contact spans after topology changes.
 - `getLooseEdgeLoopCapMode`: reads the selected loop's stored cap mode.
 - `setLooseEdgeLoopCapMode`: updates one loop or exact paired loop's cap/extrusion mode and lazily creates, replaces, or removes generated meshes for loop mode changes.
+- `setLooseEdgeLoopCapCone`: updates one cylinder loop or exact paired loop's cone flag and regenerates generated meshes.
 - `setLooseEdgeLoopCapOffset`: updates one loop or exact paired loop's stored cap offset and regenerates generated meshes.
 - `setLooseEdgeLoopCapTarget`: updates one `Ex. N`/`Cyl. N` loop's stored normal-axis target, mirrors it to an exact paired loop when present, and regenerates generated meshes.
+- `getFocusedObjectIds`: combines selected object IDs with the selected loose-edge contact-span parent object for outline focus rules.
+- `refreshViewportObjectOutlines`: refreshes gray non-focused and yellow selected-object outlines for the active viewport model.
 - `clearSelectedLooseEdgeLoop`: clears the secondary loose-edge contact-span selection and selected-span overlay while leaving cap meshes intact.
 - `resetViewerStateForModelLoad`: clears runtime selection/progress/cap state before loading or restoring a model.
 - `selectLooseEdgeLoop`: selects a hovered loose-edge contact span, shows it in yellow, and refreshes the active loop mode.
 - `handleLooseEdgeLoopModeChange`: updates the selected loop's per-loop cap mode from the loop panel.
+- `handleLooseEdgeLoopConeChange`: updates the selected cylinder loop's per-loop cone flag from the loop panel.
 - `rememberTriangleSelection`: stores the latest mesh-clicked triangle as the candidate origin for later separate-mode selection.
 - `getRememberedSelectedTriangle`: validates and returns the remembered origin only when it still belongs to the currently selected visible object.
 - `applyLinkedFaceSelectionVisuals`: reapplies object colors and selected-face overlays.
@@ -284,6 +303,8 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `commitLinkedFaceSelectionThreshold`: commits a graph-selected threshold if it changed.
 - `selectLinkedFace`: seeds linked-face selection from a clicked triangle in separate mode and reports calculation progress.
 - `refreshSeparatedObjects`: rebuilds the object list from current geometry state.
+- `setModelTextureVisibility`: stores runtime texture visibility on selectable meshes and rebuilds face material groups.
+- `toggleTextureVisibility`: toggles the runtime texture view when the loaded model has texture maps.
 - `applyObjectVisibility`: applies hidden object IDs to faces, wireframes, cap meshes, picking state, and object summaries.
 - `toggleObjectVisibility`: toggles one object's hidden state.
 - `hideSelectedObject`: hides all selected objects, or the active linked-face selection object when no multi-selection exists.
@@ -302,7 +323,7 @@ This inventory describes responsibilities, not implementation details. Code rema
 - `getTriangleAtPointer`: resolves the clicked triangle at a pointer position.
 - `handlePointerDown`: starts click tracking and captures hoverable loop/boundary targets for non-Shift clicks.
 - `handlePointerUp`: selects objects, adds Shift-clicked objects to multi-selection, selects a separate-mode starting face, clears background selection, or selects a loop on non-Shift click.
-- `handlePointerMove`: updates loose-edge and separate-boundary hover highlighting; Shift suppresses loop hover.
+- `handlePointerMove`: updates loose-edge and separate-boundary hover highlighting; separate mode suppresses existing loose-edge hover, and Shift suppresses loop hover.
 - `handlePointerLeave`: clears hover-edge state.
 - `handleKeyUp`: clears hover-edge state when Shift is released unless the event target is editable.
 - `handleKeyDown`: handles `Command/Ctrl+Z` undo, `h`, `Option+H`, and `Command+H` visibility shortcuts unless the event target is editable.
@@ -332,9 +353,9 @@ This inventory describes responsibilities, not implementation details. Code rema
 ### Control Components
 
 - `TopBar`: renders the hidden GLB file input, load button, undo button, export GLB button, and load/status text.
-- `ObjectsPanel`: renders object summaries, multi-selection highlighting, the selected-object join action, visibility toggles, and inline name editing.
+- `ObjectsPanel`: renders object summaries, multi-selection highlighting, the selected-object join action, object visibility toggles, inline name editing, and the adjacent texture visibility toggle.
 - `LinkedFaceSelectionPanel`: renders the separate-mode toggle, starting-point prompt, progress text, selection count, clickable threshold graph, and `Apply`/`Clear` actions.
-- `LoopPanel`: renders selected loose-edge contact-span controls as `Mode` (`None`, `Cap`, `Extrude`, `Cylinder`) and `Axis` (`X`, `Y`, `Z`, `Normal`) segments, with axis disabled for `None` and `Cap`.
+- `LoopPanel`: renders selected loose-edge contact-span controls as abbreviated `Mode` (`N`, `Cap`, `Ex`, `Cyl`) and `Axis` (`X`, `Y`, `Z`, `N`) segments, plus a cylinder-only `Cone` checkbox.
 
 ### Control Component Helpers
 
