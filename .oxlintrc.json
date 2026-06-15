@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [".next/**", "dist/**", "node_modules/**", "out/**", "next-env.d.ts"],
+  "rules": {
+    "eslint/no-control-regex": "off",
+    "jsx-a11y/click-events-have-key-events": "off",
+    "jsx-a11y/no-autofocus": "off",
+    "jsx-a11y/no-static-element-interactions": "off",
+    "unicorn/no-new-array": "off"
+  }
+}

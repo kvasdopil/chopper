@@ -4,8 +4,9 @@
   "ignore": [
     "next-env.d.ts",
     "next.config.ts",
+    ".oxfmtrc.json",
+    ".oxlintrc.json",
     "postcss.config.mjs",
-    "prettier.config.mjs",
     "jscpd.config.json",
     "tailwind.config.*"
   ],

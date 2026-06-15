@@ -6,12 +6,13 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "tsc -b --noEmit && eslint . --max-warnings=0",
-    "lint:prettier": "prettier --check .",
+    "lint": "oxlint --react-plugin --nextjs-plugin --jsx-a11y-plugin --max-warnings=0 .",
+    "lint:fix": "oxlint --react-plugin --nextjs-plugin --jsx-a11y-plugin --fix .",
+    "format:check": "oxfmt --check",
     "lint:knip": "knip",
     "lint:jscpd": "jscpd --config jscpd.config.json",
-    "lint:full": "yarn lint && yarn lint:prettier && yarn lint:knip && yarn lint:jscpd",
-    "format": "prettier --write ."
+    "lint:full": "yarn lint && yarn format:check && yarn lint:knip && yarn lint:jscpd",
+    "format": "oxfmt"
   },
   "dependencies": {
     "next": "16.0.0",
@@ -27,13 +28,10 @@
     "@types/react-dom": "^19",
     "@types/three": "^0.184.1",
     "clsx": "^2.1.1",
-    "eslint": "^9",
-    "eslint-config-next": "16.0.0",
-    "eslint-config-prettier": "^10.1.8",
     "jscpd": "^4.0.5",
     "knip": "^5.66.3",
-    "prettier": "^3.6.2",
-    "prettier-plugin-tailwindcss": "^0.7.1",
+    "oxfmt": "^0.55.0",
+    "oxlint": "^1.70.0",
     "tailwind-merge": "^3.4.0",
     "tailwindcss": "^4",
     "typescript": "^5"
