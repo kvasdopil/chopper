@@ -711,7 +711,7 @@ export function isEditableHotkeyTarget(target: EventTarget | null) {
 
   return Boolean(
     target.closest("input, textarea, select, [contenteditable='true'], [contenteditable='']") ||
-      (target instanceof HTMLElement && target.isContentEditable),
+    (target instanceof HTMLElement && target.isContentEditable),
   );
 }
 
