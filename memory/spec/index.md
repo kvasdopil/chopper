@@ -1,6 +1,6 @@
 # Specifications - Index
 
-Status: Draft (2026-06-07)
+Status: Draft (2026-06-15)
 
 This section is the source of truth for what the system must do. Start here for stable project context, domain rules, and testing contracts.
 
@@ -9,7 +9,7 @@ Related documents:
 - [Domain specs](domain/index.md): Business workflows and invariants. Read this when a topic is about system behavior rather than repository structure.
 - [Project specs](project/index.md): High-level repository context and shared boundaries. Read this before adding more detailed spec docs so they inherit a stable frame.
 - [Testing specs](testing/index.md): Scenarios, seeds, and other verification artifacts. Read this when documenting or proving end-to-end behavior.
-- [UI specs](ui/index.md): Viewer controls, viewport behavior, and interaction requirements. Read this before changing model loading, object visibility, linked-face selection, or separation workflows.
+- [UI specs](ui/index.md): Viewer surfaces, modes, tools, and interaction requirements. Read this before changing model loading, object visibility, linked-face selection, separation workflows, or edge-loop generation.
 - [Repository structure](../structure.md): High-level repo layout and memory bank boundaries. Read this when deciding whether a topic belongs in spec, ADR, plans, or code.
 
 ## Planned expansion
