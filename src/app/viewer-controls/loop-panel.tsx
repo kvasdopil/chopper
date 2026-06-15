@@ -81,7 +81,7 @@ export function LoopPanel({ active, cone, mode, onConeChange, onModeChange }: Lo
   const operation = getLoopOperation(mode);
   const axis = getLoopAxis(mode);
   const axisEnabled = operation === "extrude" || operation === "cylinder";
-  const coneEnabled = operation === "cylinder";
+  const coneEnabled = operation === "extrude" || operation === "cylinder";
 
   return (
     <div className="pointer-events-auto absolute top-20 left-4 w-72 max-w-[calc(100vw-2rem)] rounded-md bg-white/85 px-3 py-2 text-sm text-neutral-700 shadow-sm backdrop-blur">

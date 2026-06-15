@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { KeyboardEvent } from "react";
-import { FiEye, FiEyeOff, FiImage } from "react-icons/fi";
+import { LuEye, LuEyeOff, LuImage, LuMerge } from "react-icons/lu";
 
 import type { SeparatedObjectSummary } from "./types";
 
@@ -93,7 +93,7 @@ export function ObjectsPanel({
           onToggleTexture();
         }}
       >
-        <FiImage aria-hidden="true" />
+        <LuImage aria-hidden="true" />
       </button>
 
       <div className="pointer-events-auto absolute top-4 right-4 w-56 max-w-[calc(100vw-2rem)] rounded-md bg-white/85 px-3 py-2 text-sm text-neutral-700 shadow-sm backdrop-blur">
@@ -103,12 +103,13 @@ export function ObjectsPanel({
             {selectedObjectIds.size >= 2 ? (
               <button
                 type="button"
-                className="rounded-sm bg-neutral-950 px-2 py-0.5 text-xs font-medium text-white transition hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+                className="inline-flex items-center gap-1 rounded-sm bg-neutral-950 px-2 py-0.5 text-xs font-medium text-white transition hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
                 onClick={(event) => {
                   event.stopPropagation();
                   onJoinSelectedObjects();
                 }}
               >
+                <LuMerge aria-hidden="true" className="text-sm" />
                 Join
               </button>
             ) : null}
@@ -172,7 +173,7 @@ export function ObjectsPanel({
                     onToggleVisibility(object.id);
                   }}
                 >
-                  {object.visible ? <FiEye aria-hidden="true" /> : <FiEyeOff aria-hidden="true" />}
+                  {object.visible ? <LuEye aria-hidden="true" /> : <LuEyeOff aria-hidden="true" />}
                 </button>
               </div>
             );

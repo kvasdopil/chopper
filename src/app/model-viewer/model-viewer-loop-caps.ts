@@ -21,13 +21,13 @@ import {
   getLooseEdgeLoopFillData,
   getLooseEdgeLoopFillKey,
   getLooseEdgeLoopFromPersistedState,
-  isCylinderLoopMode,
   isDisposableDrawObject,
   isNormalTargetLoopMode,
   isSameLooseEdgeLoop,
   isSelectableMesh,
   setLooseEdgeLoopColor,
   setLooseEdgeLoopFillBaseMaterial,
+  supportsConeLoopMode,
   type HoveredEdge,
   type LooseEdgeLoop,
   type LooseEdgeLoopCapState,
@@ -609,7 +609,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
   const getLooseEdgeLoopCapCone = (edge: HoveredEdge) => {
     const state = getLooseEdgeLoopCapState(edge);
 
-    return state && isCylinderLoopMode(state.mode) ? state.cone : false;
+    return state && supportsConeLoopMode(state.mode) ? state.cone : false;
   };
 
   const setLooseEdgeLoopCapMode = (edge: HoveredEdge, mode: LooseEdgeLoopMode) => {
@@ -670,7 +670,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
         : existingMode === mode && existingState && Number.isFinite(existingState.offset)
           ? existingState.offset
           : axisData.defaultOffset;
-    const nextCone = isCylinderLoopMode(mode) ? (existingState?.cone ?? false) : false;
+    const nextCone = supportsConeLoopMode(mode) ? (existingState?.cone ?? false) : false;
     const shouldStoreAxisTarget =
       mode !== "fill" && (members.length > 1 || isNormalTargetLoopMode(mode));
     const sourceAxisWorld = shouldStoreAxisTarget ? getLoopWorldAxis(edge, axisData.axis) : null;
@@ -712,7 +712,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     const members = getLooseEdgeLoopMembers(edge);
     const state = getLooseEdgeLoopCapState(edge);
 
-    if (!state || !isCylinderLoopMode(state.mode)) {
+    if (!state || !supportsConeLoopMode(state.mode)) {
       return;
     }
 
@@ -866,7 +866,9 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     const edge = selectedLooseEdgeLoopRef.current;
 
     setLooseEdgeLoopMode(mode);
-    setLooseEdgeLoopCone(edge && isCylinderLoopMode(mode) ? getLooseEdgeLoopCapCone(edge) : false);
+    setLooseEdgeLoopCone(
+      edge && supportsConeLoopMode(mode) ? getLooseEdgeLoopCapCone(edge) : false,
+    );
 
     if (edge) {
       setLooseEdgeLoopCapMode(edge, mode);

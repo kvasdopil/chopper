@@ -1,4 +1,5 @@
 import type { MouseEvent } from "react";
+import { LuCheck, LuSplit, LuX } from "react-icons/lu";
 
 import type { LinkedFaceSelectionGraph, LinkedFaceSelectionState } from "./types";
 
@@ -101,7 +102,7 @@ export function LinkedFaceSelectionPanel({
         <div className="flex items-center justify-between gap-3">
           <button
             type="button"
-            className={`rounded-md px-3 py-1.5 text-xs font-medium shadow-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950 disabled:cursor-wait disabled:opacity-70 ${
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium shadow-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950 disabled:cursor-wait disabled:opacity-70 ${
               isModeActive
                 ? "bg-neutral-950 text-white hover:bg-neutral-800"
                 : "bg-white text-neutral-900 ring-1 ring-neutral-300 hover:bg-neutral-50"
@@ -110,6 +111,7 @@ export function LinkedFaceSelectionPanel({
             disabled={isProcessing}
             onClick={onToggleMode}
           >
+            <LuSplit aria-hidden="true" className="text-sm" />
             Separate
           </button>
           {isModeActive && selection.active && (
@@ -172,18 +174,20 @@ export function LinkedFaceSelectionPanel({
             <div className="mt-3 flex gap-2">
               <button
                 type="button"
-                className="flex-1 rounded-md bg-neutral-950 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md bg-neutral-950 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950 disabled:cursor-wait disabled:opacity-70"
                 disabled={isProcessing}
                 onClick={() => onSeparate()}
               >
+                <LuCheck aria-hidden="true" className="text-sm" />
                 Apply
               </button>
               <button
                 type="button"
-                className="flex-1 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-neutral-900 shadow-sm ring-1 ring-neutral-300 transition hover:bg-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-neutral-900 shadow-sm ring-1 ring-neutral-300 transition hover:bg-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950 disabled:cursor-wait disabled:opacity-70"
                 disabled={isProcessing}
                 onClick={() => onClear()}
               >
+                <LuX aria-hidden="true" className="text-sm" />
                 Clear
               </button>
             </div>

@@ -444,6 +444,7 @@ export function createLooseEdgeLoopExtrusionGeometry(
   data: LooseEdgeLoopFillData,
   axis: THREE.Vector3,
   capOffset: number,
+  cone = false,
 ) {
   if (axis.lengthSq() === 0) {
     return null;
@@ -458,36 +459,55 @@ export function createLooseEdgeLoopExtrusionGeometry(
   const vertices: number[] = [];
   const capNormal = axis.clone().multiplyScalar(Math.sign(extrusionLength) || 1);
   const capCenter = data.center.clone().addScaledVector(axis, extrusionLength);
-  const capPoints = data.points.map((point) => {
-    const capPoint = point.clone().addScaledVector(axis, extrusionLength);
-    const planeDistance = capPoint.clone().sub(capCenter).dot(axis);
+  const capSourcePoints = cone
+    ? data.points.map((point) => data.center.clone().lerp(point, looseEdgeLoopCylinderShapeScale))
+    : data.points;
+  const capBasePoints = getLoopPointsProjectedToAxisPlane(capSourcePoints, data.center, axis);
+  const capPoints = capBasePoints.map((point) =>
+    point.clone().addScaledVector(axis, extrusionLength),
+  );
+  const appendSideWalls = (
+    startPoints: THREE.Vector3[],
+    endPoints: THREE.Vector3[],
+    startOffset: number,
+    endOffset: number,
+  ) => {
+    data.segments.forEach((segment) => {
+      const start = startPoints[segment.startIndex]?.clone().addScaledVector(axis, startOffset);
+      const end = startPoints[segment.endIndex]?.clone().addScaledVector(axis, startOffset);
+      const capStart = endPoints[segment.startIndex]?.clone().addScaledVector(axis, endOffset);
+      const capEnd = endPoints[segment.endIndex]?.clone().addScaledVector(axis, endOffset);
 
-    return capPoint.addScaledVector(axis, -planeDistance);
-  });
+      if (!start || !end || !capStart || !capEnd) {
+        return;
+      }
+
+      pushLoopFillTriangle(
+        vertices,
+        start,
+        end,
+        capEnd,
+        getLoopTriangleOutwardNormal(start, end, capEnd, data.objectCenter),
+      );
+      pushLoopFillTriangle(
+        vertices,
+        start,
+        capEnd,
+        capStart,
+        getLoopTriangleOutwardNormal(start, capEnd, capStart, data.objectCenter),
+      );
+    });
+  };
+
+  appendSideWalls(data.points, capBasePoints, 0, extrusionLength);
 
   data.segments.forEach((segment) => {
     const capStart = capPoints[segment.startIndex];
     const capEnd = capPoints[segment.endIndex];
 
-    if (!capStart || !capEnd) {
-      return;
+    if (capStart && capEnd) {
+      pushLoopFillTriangle(vertices, capCenter, capStart, capEnd, capNormal);
     }
-
-    pushLoopFillTriangle(
-      vertices,
-      segment.start,
-      segment.end,
-      capEnd,
-      getLoopTriangleOutwardNormal(segment.start, segment.end, capEnd, data.objectCenter),
-    );
-    pushLoopFillTriangle(
-      vertices,
-      segment.start,
-      capEnd,
-      capStart,
-      getLoopTriangleOutwardNormal(segment.start, capEnd, capStart, data.objectCenter),
-    );
-    pushLoopFillTriangle(vertices, capCenter, capStart, capEnd, capNormal);
   });
 
   return createLoopFillGeometry(vertices);
@@ -616,7 +636,7 @@ export function createLooseEdgeLoopFill(
       ? createLooseEdgeLoopFlatFillGeometry(axisData.data, axisData.axis, capOffset)
       : isCylinderLoopMode(mode)
         ? createLooseEdgeLoopCylinderGeometry(axisData.data, axisData.axis, capOffset, cone)
-        : createLooseEdgeLoopExtrusionGeometry(axisData.data, axisData.axis, capOffset);
+        : createLooseEdgeLoopExtrusionGeometry(axisData.data, axisData.axis, capOffset, cone);
 
   if (!geometry) {
     return null;

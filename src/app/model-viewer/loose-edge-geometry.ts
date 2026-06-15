@@ -613,6 +613,8 @@ export function refreshLooseEdgeOverlay(
       : createLooseEdgeRenderGeometryFromCache(mesh, hiddenObjectIds, selectedObjectId);
   const segmentCount = geometry.userData.segmentCount ?? 0;
 
+  mesh.userData.renderedLooseEdgeObjectId = selectedObjectId;
+
   looseEdgeOverlays.forEach((looseEdges, index) => {
     if (!looseEdges) {
       return;
@@ -621,6 +623,7 @@ export function refreshLooseEdgeOverlay(
     looseEdges.geometry.dispose();
     looseEdges.geometry = index === 0 ? geometry : geometry.clone();
     looseEdges.geometry.userData.segmentCount = segmentCount;
+    looseEdges.userData.renderedLooseEdgeObjectId = selectedObjectId;
     looseEdges.visible = segmentCount > 0;
   });
 }

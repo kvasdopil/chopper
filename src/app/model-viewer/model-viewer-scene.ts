@@ -253,7 +253,12 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
           setLooseEdgeLoopColor(
             currentEdge.mesh,
             currentEdge.loopId,
-            getLooseEdgeLoopDisplayColor(currentEdge.mesh, loop, looseEdgeLoopCapStatesRef.current),
+            getLooseEdgeLoopDisplayColor(
+              currentEdge.mesh,
+              loop,
+              looseEdgeLoopCapStatesRef.current,
+              rootRef.current,
+            ),
           );
         }
       }

@@ -33,6 +33,94 @@ export function isSameLooseEdgeLoop(first: HoveredEdge | null, second: HoveredEd
   );
 }
 
+function getLooseEdgeLoopPositionEdgeKeys(loop: LooseEdgeLoop) {
+  return new Set(loop.pairKey.split("~").filter(Boolean));
+}
+
+function getLooseEdgeLoopRenderSegmentIndexes(mesh: THREE.Mesh, loop: LooseEdgeLoop) {
+  const segmentIndexes = new Set(loop.segmentIndexes);
+  const positionEdgeKeys = getLooseEdgeLoopPositionEdgeKeys(loop);
+  const segmentsByKey = mesh.userData.looseEdgeSegmentsByKey as
+    | Map<string, LooseEdgeSegment>
+    | undefined;
+
+  if (!(segmentsByKey instanceof Map) || positionEdgeKeys.size === 0) {
+    return segmentIndexes;
+  }
+
+  segmentsByKey.forEach((segment) => {
+    if (
+      segment.objectId === loop.objectId &&
+      segment.index >= 0 &&
+      positionEdgeKeys.has(segment.positionEdgeKey)
+    ) {
+      segmentIndexes.add(segment.index);
+    }
+  });
+
+  return segmentIndexes;
+}
+
+export function getCappedLooseEdgePositionEdgeKeys(
+  modelRoot: THREE.Object3D | null,
+  loopCapStates: Map<string, LooseEdgeLoopCapState>,
+) {
+  const positionEdgeKeys = new Set<string>();
+
+  if (!modelRoot) {
+    return positionEdgeKeys;
+  }
+
+  modelRoot.traverse((child) => {
+    if (!isSelectableMesh(child)) {
+      return;
+    }
+
+    const loopsById = child.userData.looseEdgeLoopById;
+
+    if (!(loopsById instanceof Map)) {
+      return;
+    }
+
+    loopsById.forEach((candidateLoop) => {
+      const typedLoop = candidateLoop as LooseEdgeLoop;
+
+      if (!loopCapStates.has(getLooseEdgeLoopCacheKey(child, typedLoop))) {
+        return;
+      }
+
+      getLooseEdgeLoopPositionEdgeKeys(typedLoop).forEach((positionEdgeKey) => {
+        positionEdgeKeys.add(positionEdgeKey);
+      });
+    });
+  });
+
+  return positionEdgeKeys;
+}
+
+function hasCappedLooseEdgePosition(
+  loop: LooseEdgeLoop,
+  loopCapStates: Map<string, LooseEdgeLoopCapState>,
+  modelRoot: THREE.Object3D | null | undefined,
+  cappedPositionEdgeKeys?: Set<string>,
+) {
+  if (loop.pairKey.length === 0) {
+    return false;
+  }
+
+  const positionEdgeKeys = getLooseEdgeLoopPositionEdgeKeys(loop);
+  const cappedEdgeKeys =
+    cappedPositionEdgeKeys ?? getCappedLooseEdgePositionEdgeKeys(modelRoot ?? null, loopCapStates);
+
+  if (positionEdgeKeys.size === 0 || cappedEdgeKeys.size === 0) {
+    return false;
+  }
+
+  return Array.from(positionEdgeKeys).some((positionEdgeKey) =>
+    cappedEdgeKeys.has(positionEdgeKey),
+  );
+}
+
 export function setLooseEdgeLoopColor(
   mesh: THREE.Mesh,
   loopId: number | undefined,
@@ -53,9 +141,11 @@ export function setLooseEdgeLoopColor(
     mesh.userData.obstructedLooseEdgeOverlay as LineSegments2 | undefined,
     mesh.userData.looseEdgeOverlay as LineSegments2 | undefined,
   ];
+  const overlayObjectId = mesh.userData.renderedLooseEdgeObjectId as number | null | undefined;
+  const segmentIndexes = getLooseEdgeLoopRenderSegmentIndexes(mesh, loop);
 
   if (renderCache) {
-    loop.segmentIndexes.forEach((segmentIndex) => {
+    segmentIndexes.forEach((segmentIndex) => {
       if (segmentIndex < 0 || segmentIndex >= renderCache.segmentCount) {
         return;
       }
@@ -72,7 +162,7 @@ export function setLooseEdgeLoopColor(
   }
 
   overlays.forEach((overlay) => {
-    if (!overlay) {
+    if (!overlay || overlayObjectId !== loop.objectId) {
       return;
     }
 
@@ -83,7 +173,7 @@ export function setLooseEdgeLoopColor(
       return;
     }
 
-    loop.segmentIndexes.forEach((segmentIndex) => {
+    segmentIndexes.forEach((segmentIndex) => {
       if (segmentIndex < 0 || segmentIndex >= startColor.count || segmentIndex >= endColor.count) {
         return;
       }
@@ -229,8 +319,14 @@ export function getLooseEdgeLoopDisplayColor(
   mesh: THREE.Mesh,
   loop: LooseEdgeLoop,
   loopCapStates: Map<string, LooseEdgeLoopCapState>,
+  modelRoot?: THREE.Object3D | null,
+  cappedPositionEdgeKeys?: Set<string>,
 ) {
-  return loopCapStates.has(getLooseEdgeLoopCacheKey(mesh, loop))
+  if (loopCapStates.has(getLooseEdgeLoopCacheKey(mesh, loop))) {
+    return cappedLooseEdgeColor;
+  }
+
+  return hasCappedLooseEdgePosition(loop, loopCapStates, modelRoot, cappedPositionEdgeKeys)
     ? cappedLooseEdgeColor
     : looseEdgeColor;
 }

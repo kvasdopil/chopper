@@ -29,6 +29,7 @@ import {
   refreshObjectOutlines,
   refreshLooseEdgeOverlays,
   setLooseEdgeLoopColor,
+  getCappedLooseEdgePositionEdgeKeys,
   getLooseEdgeLoopDisplayColor,
   updateHoverEdgeResolution,
   applyObjectColors,
@@ -250,6 +251,11 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       return;
     }
 
+    const cappedPositionEdgeKeys = getCappedLooseEdgePositionEdgeKeys(
+      modelRoot,
+      looseEdgeLoopCapStatesRef.current,
+    );
+
     modelRoot.traverse((child) => {
       if (!isSelectableMesh(child)) {
         return;
@@ -267,7 +273,13 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         setLooseEdgeLoopColor(
           child,
           typedLoop.id,
-          getLooseEdgeLoopDisplayColor(child, typedLoop, looseEdgeLoopCapStatesRef.current),
+          getLooseEdgeLoopDisplayColor(
+            child,
+            typedLoop,
+            looseEdgeLoopCapStatesRef.current,
+            modelRoot,
+            cappedPositionEdgeKeys,
+          ),
         );
       });
     });

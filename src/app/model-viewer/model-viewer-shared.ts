@@ -271,6 +271,10 @@ export function isCylinderLoopMode(mode: LooseEdgeLoopMode) {
   );
 }
 
+export function supportsConeLoopMode(mode: LooseEdgeLoopMode) {
+  return mode.startsWith("extrude-") || isCylinderLoopMode(mode);
+}
+
 export function isNormalTargetLoopMode(mode: LooseEdgeLoopMode) {
   return mode === "extrude-normal" || mode === "cylinder-normal";
 }
