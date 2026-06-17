@@ -56,7 +56,7 @@ Related documents:
 ## Visibility
 
 - The eye control toggles object visibility.
-- Hidden objects do not render faces, outlines, wireframes, loose-edge lines, generated edge-loop geometry, or participate in pointer picking.
+- Hidden objects do not render faces, outlines, loose-edge lines, generated edge-loop geometry, or participate in pointer picking.
 - Pressing `h` hides all selected objects.
 - Pressing `Option+H` or `Command+H` unhides all objects when the browser receives the event.
 - Viewer hotkeys are ignored while the active target is an editable text field or content-editable area.

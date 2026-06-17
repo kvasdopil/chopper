@@ -4,7 +4,6 @@ import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 
 import {
-  defaultObjectId,
   hoverEdgeColor,
   hoverEdgeLineWidth,
   hoverEdgeRenderOrder,
@@ -19,13 +18,10 @@ import {
   obstructedLooseEdgeOpacity,
   selectedObjectOutlineRenderOrder,
   selectedObjectStencilRenderOrder,
-  wireframeColor,
-  wireframeOpacity,
   disposeMaterial,
   getMaterialTextureMaps,
   getSourceTriangleMaterialIndexes,
   getTriangleObjectIdSet,
-  getTriangleObjectIds,
   isDisposableDrawObject,
   isMesh,
   isSelectableMesh,
@@ -87,27 +83,6 @@ export function styleModel(model: THREE.Object3D) {
 
     mesh.material = createFaceMaterial();
     refreshMeshObjectMaterialGroups(mesh, new Set<number>());
-
-    const wireframe = new THREE.LineSegments(
-      new THREE.BufferGeometry(),
-      new THREE.LineBasicMaterial({
-        color: wireframeColor,
-        depthWrite: false,
-        opacity: wireframeOpacity,
-        transparent: true,
-      }),
-    );
-    wireframe.position.copy(mesh.position);
-    wireframe.quaternion.copy(mesh.quaternion);
-    wireframe.scale.copy(mesh.scale);
-    wireframe.matrix.copy(mesh.matrix);
-    wireframe.matrixAutoUpdate = mesh.matrixAutoUpdate;
-    wireframe.geometry = createObjectWireframeGeometry(mesh, new Set<number>());
-    wireframe.name = "wireframe-overlay";
-    wireframe.renderOrder = 1;
-    wireframe.userData.isWireframeOverlay = true;
-    wireframe.visible = false;
-    mesh.userData.wireframeOverlay = wireframe;
 
     const obstructedLooseEdges = new LineSegments2(
       new LineSegmentsGeometry(),
@@ -234,10 +209,6 @@ export function styleModel(model: THREE.Object3D) {
     mesh.userData.hoverEdgeOverlay = hoverEdge;
 
     overlays.push({
-      overlay: wireframe,
-      parent: mesh.parent ?? model,
-    });
-    overlays.push({
       overlay: obstructedLooseEdges,
       parent: mesh.parent ?? model,
     });
@@ -269,74 +240,6 @@ export function styleModel(model: THREE.Object3D) {
 
   overlays.forEach(({ parent, overlay }) => {
     parent.add(overlay);
-  });
-}
-
-export function createObjectWireframeGeometry(mesh: THREE.Mesh, hiddenObjectIds: Set<number>) {
-  const geometry = new THREE.BufferGeometry();
-  const position = mesh.geometry.getAttribute("position");
-  const objectIds = getTriangleObjectIds(mesh);
-  const segmentPositions: number[] = [];
-
-  if (!(position instanceof THREE.BufferAttribute)) {
-    return geometry;
-  }
-
-  for (let index = 0; index < position.count; index += 3) {
-    const triangleIndex = index / 3;
-    const objectId = objectIds?.[triangleIndex] ?? defaultObjectId;
-
-    if (hiddenObjectIds.has(objectId)) {
-      continue;
-    }
-
-    const ax = position.getX(index);
-    const ay = position.getY(index);
-    const az = position.getZ(index);
-    const bx = position.getX(index + 1);
-    const by = position.getY(index + 1);
-    const bz = position.getZ(index + 1);
-    const cx = position.getX(index + 2);
-    const cy = position.getY(index + 2);
-    const cz = position.getZ(index + 2);
-
-    segmentPositions.push(ax, ay, az, bx, by, bz, bx, by, bz, cx, cy, cz, cx, cy, cz, ax, ay, az);
-  }
-
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(segmentPositions, 3));
-
-  return geometry;
-}
-
-export function refreshObjectWireframe(
-  mesh: THREE.Mesh,
-  hiddenObjectIds: Set<number>,
-  showWireframes: boolean,
-) {
-  const wireframe = mesh.userData.wireframeOverlay as THREE.LineSegments | undefined;
-
-  if (!wireframe) {
-    return;
-  }
-
-  wireframe.geometry.dispose();
-  wireframe.geometry = createObjectWireframeGeometry(mesh, hiddenObjectIds);
-
-  const position = wireframe.geometry.getAttribute("position");
-
-  wireframe.visible =
-    showWireframes && position instanceof THREE.BufferAttribute && position.count > 0;
-}
-
-export function refreshObjectWireframes(
-  model: THREE.Object3D,
-  hiddenObjectIds: Set<number>,
-  showWireframes: boolean,
-) {
-  model.traverse((child) => {
-    if (isSelectableMesh(child)) {
-      refreshObjectWireframe(child, hiddenObjectIds, showWireframes);
-    }
   });
 }
 

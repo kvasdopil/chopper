@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 
 import type {
@@ -17,14 +18,26 @@ import type {
   SeparatedObjectSummary,
 } from "../viewer-controls/types";
 import type { PersistedModelSource } from "./persistence";
-import type { MutableRef } from "./model-viewer-scene-types";
+import type { MutableRef, ViewerCamera } from "./model-viewer-scene-types";
+
+export type SeparationCameraState = {
+  far: number;
+  near: number;
+  position: THREE.Vector3;
+  quaternion: THREE.Quaternion;
+  target: THREE.Vector3;
+  zoom: number;
+};
 
 export type ModelViewerSelectionParams = {
   mountRef: MutableRef<HTMLDivElement | null>;
+  cameraRef: MutableRef<ViewerCamera | null>;
+  controlsRef: MutableRef<OrbitControls | null>;
   rootRef: MutableRef<THREE.Group | null>;
+  separationCameraAnimationFrameRef: MutableRef<number | null>;
+  separationCameraStateRef: MutableRef<SeparationCameraState | null>;
   linkedFaceSelectionRef: MutableRef<LinkedFaceSelectionDetails | null>;
   linkedFaceSelectionCacheRef: MutableRef<LinkedFaceSelectionCache | null>;
-  linkedFaceSelectionOverlayRef: MutableRef<LineSegments2 | null>;
   selectionBoundaryLoopsRef: MutableRef<SelectionBoundaryLoop[]>;
   selectionBoundaryLoopOverlayRef: MutableRef<LineSegments2 | null>;
   linkedFaceSelectionThresholdRef: MutableRef<number>;

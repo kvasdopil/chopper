@@ -1,6 +1,7 @@
 import * as THREE from "three";
 
 import {
+  cameraNearPlane,
   separationProgressCheckInterval,
   applyLinkedFaceSelectionColors,
   applyObjectColors,
@@ -8,12 +9,10 @@ import {
   applyViewerHistoryMeshStates,
   buildLinkedFaceSelection,
   buildLinkedFaceSelectionCache,
-  buildMeshTopology,
   buildSelectionBoundaryLoops,
   collectSelectableMeshes,
   collectSeparatedObjects,
   createLinkedFaceSelectionFromCache,
-  createLinkedFaceSelectionOverlay,
   createSelectedObjectJoinPlan,
   createSelectionBoundaryLoopOverlay,
   createThrottledProgressReporter,
@@ -24,7 +23,6 @@ import {
   isSelectableMesh,
   refreshLooseEdgeOverlays,
   refreshObjectMaterialGroups,
-  refreshObjectWireframes,
   separateLooseObjectPartsAsync,
   updateHoverEdgeResolution,
   waitForBrowserPaint,
@@ -37,10 +35,13 @@ import type { ModelViewerSelectionParams } from "./model-viewer-selection-types"
 export function useModelViewerSelection(params: ModelViewerSelectionParams) {
   const {
     mountRef,
+    cameraRef,
+    controlsRef,
     rootRef,
+    separationCameraAnimationFrameRef,
+    separationCameraStateRef,
     linkedFaceSelectionRef,
     linkedFaceSelectionCacheRef,
-    linkedFaceSelectionOverlayRef,
     selectionBoundaryLoopsRef,
     selectionBoundaryLoopOverlayRef,
     linkedFaceSelectionThresholdRef,
@@ -124,6 +125,257 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     return rememberedTriangle;
   };
 
+  const cancelSeparationCameraAnimation = () => {
+    if (separationCameraAnimationFrameRef.current == null) {
+      return;
+    }
+
+    window.cancelAnimationFrame(separationCameraAnimationFrameRef.current);
+    separationCameraAnimationFrameRef.current = null;
+  };
+
+  const getCameraState = (
+    camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
+    controls: { target: THREE.Vector3 },
+  ) => ({
+    far: camera.far,
+    near: camera.near,
+    position: camera.position.clone(),
+    quaternion: camera.quaternion.clone(),
+    target: controls.target.clone(),
+    zoom: camera.zoom,
+  });
+
+  const applyCameraState = (
+    camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
+    controls: { target: THREE.Vector3; update: () => void },
+    state: ReturnType<typeof getCameraState>,
+  ) => {
+    camera.position.copy(state.position);
+    camera.quaternion.copy(state.quaternion);
+    camera.near = state.near;
+    camera.far = state.far;
+    camera.zoom = state.zoom;
+    camera.updateProjectionMatrix();
+    controls.target.copy(state.target);
+    controls.update();
+  };
+
+  const animateCameraState = (
+    camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
+    controls: { target: THREE.Vector3; update: () => void },
+    nextState: ReturnType<typeof getCameraState>,
+  ) => {
+    const startState = getCameraState(camera, controls);
+    const startTime = performance.now();
+    const durationMs = 420;
+
+    cancelSeparationCameraAnimation();
+
+    const step = (now: number) => {
+      const rawProgress = Math.min(Math.max((now - startTime) / durationMs, 0), 1);
+      const progress = 1 - Math.pow(1 - rawProgress, 3);
+
+      camera.position.lerpVectors(startState.position, nextState.position, progress);
+      camera.quaternion.slerpQuaternions(startState.quaternion, nextState.quaternion, progress);
+      camera.near = THREE.MathUtils.lerp(startState.near, nextState.near, progress);
+      camera.far = THREE.MathUtils.lerp(startState.far, nextState.far, progress);
+      camera.zoom = THREE.MathUtils.lerp(startState.zoom, nextState.zoom, progress);
+      camera.updateProjectionMatrix();
+      controls.target.lerpVectors(startState.target, nextState.target, progress);
+      controls.update();
+
+      if (rawProgress < 1) {
+        separationCameraAnimationFrameRef.current = window.requestAnimationFrame(step);
+      } else {
+        separationCameraAnimationFrameRef.current = null;
+        applyCameraState(camera, controls, nextState);
+      }
+    };
+
+    separationCameraAnimationFrameRef.current = window.requestAnimationFrame(step);
+  };
+
+  const getSeparatedObjectBounds = (modelRoot: THREE.Object3D, objectId: number) => {
+    const bounds = new THREE.Box3();
+    const point = new THREE.Vector3();
+
+    modelRoot.updateMatrixWorld(true);
+    collectSelectableMeshes(modelRoot).forEach((mesh) => {
+      const position = mesh.geometry.getAttribute("position");
+      const objectIds = getTriangleObjectIds(mesh);
+
+      if (!(position instanceof THREE.BufferAttribute) || !objectIds) {
+        return;
+      }
+
+      mesh.updateMatrixWorld(true);
+
+      for (let index = 0; index + 2 < position.count; index += 3) {
+        const triangleIndex = index / 3;
+
+        if ((objectIds[triangleIndex] ?? 0) !== objectId) {
+          continue;
+        }
+
+        for (let offset = 0; offset < 3; offset += 1) {
+          bounds.expandByPoint(
+            point.fromBufferAttribute(position, index + offset).applyMatrix4(mesh.matrixWorld),
+          );
+        }
+      }
+    });
+
+    return bounds.isEmpty() ? null : bounds;
+  };
+
+  const getFramedCameraStateForBounds = (
+    camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
+    controls: { target: THREE.Vector3 },
+    bounds: THREE.Box3,
+  ) => {
+    const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+    const center = sphere.center;
+    const radius = Math.max(sphere.radius, 0.001);
+    const direction = camera.position.clone().sub(controls.target).normalize();
+    const aspect =
+      camera instanceof THREE.PerspectiveCamera
+        ? camera.aspect
+        : (camera.right - camera.left) / Math.max(camera.top - camera.bottom, 0.0001);
+    const verticalFov =
+      camera instanceof THREE.PerspectiveCamera
+        ? THREE.MathUtils.degToRad(camera.fov)
+        : Math.PI / 4;
+    const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
+    const fitFov = Math.min(verticalFov, horizontalFov);
+    const distance =
+      camera instanceof THREE.PerspectiveCamera
+        ? (radius / Math.sin(fitFov / 2)) * 1.08
+        : Math.max(camera.position.distanceTo(controls.target), radius * 4);
+
+    if (direction.lengthSq() === 0) {
+      direction.set(1, 1, 1).normalize();
+    }
+
+    const nextState = getCameraState(camera, controls);
+
+    nextState.target.copy(center);
+    nextState.position.copy(center).addScaledVector(direction, distance);
+    nextState.near = cameraNearPlane;
+    nextState.far = Math.max(distance + radius * 24, distance * 12, 100);
+
+    if (camera instanceof THREE.OrthographicCamera) {
+      const width = camera.right - camera.left;
+      const height = camera.top - camera.bottom;
+      const diameter = radius * 2.16;
+
+      nextState.zoom = Math.max(0.01, Math.min(width / diameter, height / diameter));
+    }
+
+    return nextState;
+  };
+
+  const focusCameraOnSelectedObjectForSeparation = () => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    const modelRoot = rootRef.current;
+    const selectedObjectId = selectedObjectIdRef.current;
+
+    if (!camera || !controls || !modelRoot || selectedObjectId == null) {
+      return;
+    }
+
+    const bounds = getSeparatedObjectBounds(modelRoot, selectedObjectId);
+
+    if (!bounds) {
+      return;
+    }
+
+    separationCameraStateRef.current = getCameraState(camera, controls);
+    animateCameraState(camera, controls, getFramedCameraStateForBounds(camera, controls, bounds));
+  };
+
+  const restoreCameraAfterSeparation = () => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    const previousState = separationCameraStateRef.current;
+
+    separationCameraStateRef.current = null;
+
+    if (!camera || !controls || !previousState) {
+      cancelSeparationCameraAnimation();
+      return;
+    }
+
+    animateCameraState(camera, controls, previousState);
+  };
+
+  const setSeparateModeInactive = () => {
+    restoreCameraAfterSeparation();
+    setSeparateModeActiveState(false);
+  };
+
+  const getSeparateModeFocusedObjectIds = () =>
+    separateModeActiveRef.current && selectedObjectIdRef.current != null
+      ? new Set([selectedObjectIdRef.current])
+      : null;
+
+  const refreshObjectMaterials = (modelRoot: THREE.Object3D) => {
+    refreshObjectMaterialGroups(
+      modelRoot,
+      hiddenObjectIdsRef.current,
+      getSeparateModeFocusedObjectIds(),
+    );
+  };
+
+  const getLinkedFaceSelectionColorCache = (selection: LinkedFaceSelectionDetails) => {
+    const cache = linkedFaceSelectionCacheRef.current;
+
+    return cache &&
+      cache.mesh === selection.mesh &&
+      cache.objectId === selection.objectId &&
+      cache.seedTriangleIndex === selection.seedTriangleIndex
+      ? cache
+      : null;
+  };
+
+  const refreshSelectionBoundaryLoops = (selection: LinkedFaceSelectionDetails) => {
+    const modelRoot = rootRef.current;
+
+    if (!modelRoot || !separateModeActiveRef.current) {
+      selectionBoundaryLoopsRef.current = [];
+      return;
+    }
+
+    const boundaryLoops = buildSelectionBoundaryLoops(selection);
+    const boundaryOverlay = createSelectionBoundaryLoopOverlay(selection, boundaryLoops);
+
+    selectionBoundaryLoopsRef.current = boundaryLoops;
+
+    if (boundaryOverlay) {
+      (selection.mesh.parent ?? modelRoot).add(boundaryOverlay);
+      selectionBoundaryLoopOverlayRef.current = boundaryOverlay;
+    }
+  };
+
+  const refreshLinkedFaceSelectionThresholdVisuals = (
+    selection: LinkedFaceSelectionDetails | null,
+  ) => {
+    const modelRoot = rootRef.current;
+
+    if (!modelRoot || !selection) {
+      return;
+    }
+
+    clearSelectionBoundaryLoopOverlay();
+    refreshSelectionBoundaryLoops(selection);
+    updateHoverEdgeResolution(
+      modelRoot,
+      mountRef.current?.clientWidth ?? 1,
+      mountRef.current?.clientHeight ?? 1,
+    );
+  };
+
   const applyLinkedFaceSelectionVisuals = (selection: LinkedFaceSelectionDetails | null) => {
     const modelRoot = rootRef.current;
 
@@ -131,30 +383,13 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       return;
     }
 
+    refreshObjectMaterials(modelRoot);
     applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
-    applyLinkedFaceSelectionColors(selection);
+    applyLinkedFaceSelectionColors(selection, getLinkedFaceSelectionColorCache(selection));
     refreshViewportObjectOutlines(modelRoot);
     clearLinkedFaceSelectionOverlay();
     clearSelectionBoundaryLoopOverlay();
-
-    const overlay = createLinkedFaceSelectionOverlay(selection);
-
-    if (overlay) {
-      modelRoot.add(overlay);
-      linkedFaceSelectionOverlayRef.current = overlay;
-    }
-
-    if (separateModeActiveRef.current) {
-      const boundaryLoops = buildSelectionBoundaryLoops(selection);
-      const boundaryOverlay = createSelectionBoundaryLoopOverlay(selection, boundaryLoops);
-
-      selectionBoundaryLoopsRef.current = boundaryLoops;
-
-      if (boundaryOverlay) {
-        (selection.mesh.parent ?? modelRoot).add(boundaryOverlay);
-        selectionBoundaryLoopOverlayRef.current = boundaryOverlay;
-      }
-    }
+    refreshSelectionBoundaryLoops(selection);
 
     updateHoverEdgeResolution(
       modelRoot,
@@ -172,18 +407,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
 
     clearLinkedFaceSelectionOverlay();
     clearSelectionBoundaryLoopOverlay();
-
-    if (separateModeActiveRef.current) {
-      const boundaryLoops = buildSelectionBoundaryLoops(selection);
-      const boundaryOverlay = createSelectionBoundaryLoopOverlay(selection, boundaryLoops);
-
-      selectionBoundaryLoopsRef.current = boundaryLoops;
-
-      if (boundaryOverlay) {
-        (selection.mesh.parent ?? modelRoot).add(boundaryOverlay);
-        selectionBoundaryLoopOverlayRef.current = boundaryOverlay;
-      }
-    }
+    refreshSelectionBoundaryLoops(selection);
 
     updateHoverEdgeResolution(
       modelRoot,
@@ -210,13 +434,13 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     if (clearObjectSelection) {
       rememberedTriangleSelectionRef.current = null;
       clearObjectSelectionState();
-      setSeparateModeActiveState(false);
+      setSeparateModeInactive();
       setSeparationProgress(null);
       refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
     }
 
     if (modelRoot && refreshVisuals) {
-      refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current, separateModeActiveRef.current);
+      refreshObjectMaterials(modelRoot);
 
       if (hadLinkedFaceSelection) {
         applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
@@ -244,7 +468,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     clearLinkedFaceSelection(true, false);
     clearLooseEdgeLoopCapStates();
     rememberedTriangleSelectionRef.current = null;
-    setSeparateModeActiveState(false);
+    setSeparateModeInactive();
     setSeparationProgress(null);
     setLooseEdgeLoopMode("none");
     setSelectedLooseEdgeLoopActive(false);
@@ -261,9 +485,8 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     objectNamesRef.current = { ...snapshot.objectNames };
     nextSeparatedObjectIdRef.current = snapshot.nextObjectId;
     clearObjectSelectionState();
-    refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+    refreshObjectMaterials(modelRoot);
     applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
-    refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current, separateModeActiveRef.current);
     refreshViewportObjectOutlines(modelRoot);
     refreshLooseEdgeOverlays(
       modelRoot,
@@ -312,11 +535,16 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
 
     const nextSeparateModeActive = !separateModeActiveRef.current;
 
-    setSeparateModeActiveState(nextSeparateModeActive);
+    if (nextSeparateModeActive) {
+      setSeparateModeActiveState(true);
+      focusCameraOnSelectedObjectForSeparation();
+    } else {
+      setSeparateModeInactive();
+    }
     setSeparationProgress(null);
 
     if (rootRef.current) {
-      refreshObjectWireframes(rootRef.current, hiddenObjectIdsRef.current, nextSeparateModeActive);
+      refreshObjectMaterials(rootRef.current);
     }
 
     if (!nextSeparateModeActive) {
@@ -373,7 +601,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       count: nextSelection.selectedTriangleIndexes.size,
       threshold,
     });
-    applyLinkedFaceSelectionVisuals(nextSelection);
+    refreshLinkedFaceSelectionThresholdVisuals(nextSelection);
   };
 
   const commitLinkedFaceSelectionThreshold = (threshold: number) => {
@@ -410,6 +638,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       linkedFaceSelectionRef.current = selection;
       linkedFaceSelectionCacheRef.current = cache;
       setObjectSelectionState(new Set([selection.objectId]), selection.objectId);
+      refreshObjectMaterials(rootRef.current ?? selection.mesh);
       refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
       refreshLooseEdgeOverlays(
         rootRef.current ?? selection.mesh,
@@ -455,7 +684,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     collectSelectableMeshes(modelRoot).forEach((mesh) => {
       mesh.userData.textureVisible = visible;
     });
-    refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+    refreshObjectMaterials(modelRoot);
   };
 
   const toggleTextureVisibility = () => {
@@ -512,7 +741,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
         nextSelectedObjectIds,
         nextSelectedObjectIds.values().next().value ?? null,
       );
-      setSeparateModeActiveState(false);
+      setSeparateModeInactive();
       setSeparationProgress(null);
     } else if (nextSelectedObjectIds.size !== selectedObjectIdsRef.current.size) {
       setObjectSelectionState(nextSelectedObjectIds, currentSelectedObjectId);
@@ -521,8 +750,11 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     refreshLooseEdgeLoopCapVisibility(nextHiddenObjectIds);
 
     if (modelRoot) {
-      refreshObjectMaterialGroups(modelRoot, nextHiddenObjectIds);
-      refreshObjectWireframes(modelRoot, nextHiddenObjectIds, separateModeActiveRef.current);
+      refreshObjectMaterialGroups(
+        modelRoot,
+        nextHiddenObjectIds,
+        getSeparateModeFocusedObjectIds(),
+      );
       refreshViewportObjectOutlines(modelRoot, nextHiddenObjectIds);
       refreshLooseEdgeOverlays(modelRoot, nextHiddenObjectIds, selectedObjectIdRef.current, false);
       refreshLooseEdgeLoopDisplayColors(modelRoot);
@@ -620,9 +852,8 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     rememberedTriangleSelectionRef.current = null;
     setObjectSelectionState(nextSelectedObjectIds, nextPrimaryObjectId);
     refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
-    refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+    refreshObjectMaterials(modelRoot);
     applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
-    refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current, separateModeActiveRef.current);
     refreshViewportObjectOutlines(modelRoot);
     refreshLooseEdgeOverlays(
       modelRoot,
@@ -670,6 +901,10 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     const modelRoot = rootRef.current;
 
     if (modelRoot) {
+      if (separateModeActiveRef.current) {
+        refreshObjectMaterials(modelRoot);
+      }
+
       if (hasLinkedFaceSelection) {
         applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
       }
@@ -771,9 +1006,8 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
         active: false,
         count: 0,
       }));
-      refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+      refreshObjectMaterials(modelRoot);
       applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
-      refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current, separateModeActiveRef.current);
       refreshViewportObjectOutlines(modelRoot);
       refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
       syncLooseEdgeLoopCapStates(modelRoot);
@@ -822,14 +1056,9 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       }
 
       pushViewerHistorySnapshot(historySnapshot);
-      const topology = buildMeshTopology(selection.mesh);
-
-      if (!topology) {
-        return;
-      }
 
       await separateLooseObjectPartsAsync(
-        topology,
+        selection.topology,
         objectIds,
         [selection.objectId],
         () => {
@@ -844,15 +1073,15 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
 
       await reportProgress("Refreshing model");
 
-      refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+      refreshObjectMaterials(modelRoot);
       applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
-      refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current, separateModeActiveRef.current);
-      refreshViewportObjectOutlines(modelRoot);
-      refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
-      syncLooseEdgeLoopCapStates(modelRoot);
       refreshSeparatedObjects();
 
-      const nextSelectionCache = buildLinkedFaceSelectionCache(seedMesh, seedTriangleIndex);
+      const nextSelectionCache = buildLinkedFaceSelectionCache(
+        seedMesh,
+        seedTriangleIndex,
+        selection.topology,
+      );
 
       if (nextSelectionCache) {
         const nextSelection = createLinkedFaceSelectionFromCache(
@@ -871,9 +1100,11 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
           count: nextSelection.selectedTriangleIndexes.size,
           threshold: linkedFaceSelectionThresholdRef.current,
         });
+        applyLinkedFaceSelectionColors(nextSelection, nextSelectionCache);
         refreshViewportObjectOutlines(modelRoot);
         applyBoundaryCutSelectionVisuals(nextSelection);
         refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, nextSelection.objectId);
+        syncLooseEdgeLoopCapStates(modelRoot);
       } else {
         rememberedTriangleSelectionRef.current = null;
         linkedFaceSelectionRef.current = null;
@@ -886,6 +1117,13 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
           active: false,
           count: 0,
         }));
+        refreshViewportObjectOutlines(modelRoot);
+        refreshLooseEdgeOverlays(
+          modelRoot,
+          hiddenObjectIdsRef.current,
+          selectedObjectIdRef.current,
+        );
+        syncLooseEdgeLoopCapStates(modelRoot);
       }
 
       schedulePersistViewerState();

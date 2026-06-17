@@ -43,7 +43,6 @@ export function applyObjectColors(model: THREE.Object3D, hiddenObjectIds = new S
   model.traverse((child) => {
     if (
       !isMesh(child) ||
-      child.userData.isWireframeOverlay === true ||
       child.userData.isLooseEdgeFillOverlay === true ||
       child.userData.isCapOffsetGizmoOverlay === true ||
       child.userData.isNonFocusedObjectStencilOverlay === true ||

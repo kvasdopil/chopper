@@ -6,6 +6,7 @@ import {
   nonFocusedObjectBoundaryOpacity,
   nonFocusedObjectOutlineColor,
   nonFocusedObjectOutlinePixels,
+  nonFocusedObjectOpacity,
   selectedObjectOutlineColor,
   selectedObjectOutlinePixels,
   disposeMaterial,
@@ -120,7 +121,9 @@ export function createFaceMaterial(
   visible = true,
   textureMap: THREE.Texture | null = null,
   objectId = defaultObjectId,
+  opacity = 1,
 ) {
+  const isTransparent = opacity < 1;
   const objectBoundaryOutlineUniforms = {
     objectBoundaryOutlineColor: { value: new THREE.Color(nonFocusedObjectOutlineColor) },
     objectBoundaryOutlineEnabled: { value: 1 },
@@ -129,13 +132,16 @@ export function createFaceMaterial(
   };
   const material = new THREE.MeshStandardMaterial({
     color: 0xffffff,
+    depthWrite: !isTransparent,
     map: textureMap,
     metalness: 0,
+    opacity,
     polygonOffset: true,
     polygonOffsetFactor: 1,
     polygonOffsetUnits: 1,
     roughness: 0.82,
     side: THREE.FrontSide,
+    transparent: isTransparent,
     vertexColors: textureMap === null,
   });
 
@@ -363,7 +369,11 @@ export function createSelectedObjectOutlineMaterial(
   return material;
 }
 
-export function refreshMeshObjectMaterialGroups(mesh: THREE.Mesh, hiddenObjectIds: Set<number>) {
+export function refreshMeshObjectMaterialGroups(
+  mesh: THREE.Mesh,
+  hiddenObjectIds: Set<number>,
+  focusedObjectIds: Set<number> | null = null,
+) {
   const position = mesh.geometry.getAttribute("position");
   const objectIds = getTriangleObjectIds(mesh);
   const sourceMaterialIndexes = mesh.geometry.userData.sourceMaterialIndexes as
@@ -391,9 +401,21 @@ export function refreshMeshObjectMaterialGroups(mesh: THREE.Mesh, hiddenObjectId
 
     const materialIndex = materials.length;
     const textureMap = textureVisible ? getMeshSourceTextureMap(mesh, sourceMaterialIndex) : null;
+    const isDimmed =
+      focusedObjectIds != null &&
+      focusedObjectIds.size > 0 &&
+      !focusedObjectIds.has(objectId) &&
+      !hiddenObjectIds.has(objectId);
 
     materialIndexByKey.set(key, materialIndex);
-    materials.push(createFaceMaterial(!hiddenObjectIds.has(objectId), textureMap, objectId));
+    materials.push(
+      createFaceMaterial(
+        !hiddenObjectIds.has(objectId),
+        textureMap,
+        objectId,
+        isDimmed ? nonFocusedObjectOpacity : 1,
+      ),
+    );
 
     return materialIndex;
   };
@@ -429,10 +451,14 @@ export function refreshMeshObjectMaterialGroups(mesh: THREE.Mesh, hiddenObjectId
   }
 }
 
-export function refreshObjectMaterialGroups(model: THREE.Object3D, hiddenObjectIds: Set<number>) {
+export function refreshObjectMaterialGroups(
+  model: THREE.Object3D,
+  hiddenObjectIds: Set<number>,
+  focusedObjectIds: Set<number> | null = null,
+) {
   model.traverse((child) => {
     if (isSelectableMesh(child)) {
-      refreshMeshObjectMaterialGroups(child, hiddenObjectIds);
+      refreshMeshObjectMaterialGroups(child, hiddenObjectIds, focusedObjectIds);
     }
   });
 }

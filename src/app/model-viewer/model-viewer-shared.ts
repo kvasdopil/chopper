@@ -11,8 +11,6 @@ export const targetModelSize = 4;
 export const defaultObjectId = 0;
 export const defaultObjectColor = new THREE.Color(0xd8d8d8);
 export const hiddenObjectColor = new THREE.Color(0xf2f2f0);
-export const wireframeColor = 0x3f3f46;
-export const wireframeOpacity = 0.16;
 export const defaultViewDirection = new THREE.Vector3(1.8, 1.15, 2.3).normalize();
 export const minOrbitDistance = 0.02;
 export const maxOrbitDistance = 80;
@@ -26,6 +24,7 @@ export const selectedObjectOutlinePixels = 2;
 export const nonFocusedObjectOutlineColor = 0xb8b8b8;
 export const nonFocusedObjectOutlinePixels = 2;
 export const nonFocusedObjectBoundaryOpacity = 0.82;
+export const nonFocusedObjectOpacity = 0.3;
 export const maxSelectedObjectOutlineIds = 64;
 export const nonFocusedObjectOutlineStencilRef = 3;
 export const nonFocusedObjectStencilRenderOrder = 3.5;
@@ -702,7 +701,6 @@ export function modelHasSourceTextureMaps(model: THREE.Object3D) {
 export function isSelectableMesh(object: THREE.Object3D): object is THREE.Mesh {
   return (
     isMesh(object) &&
-    object.userData.isWireframeOverlay !== true &&
     object.userData.isLooseEdgeOverlay !== true &&
     object.userData.isLooseEdgeFillOverlay !== true &&
     object.userData.isCapOffsetGizmoOverlay !== true &&

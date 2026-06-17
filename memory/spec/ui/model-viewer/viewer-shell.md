@@ -46,7 +46,7 @@ Related documents:
 - 3MF export creates a slicer-oriented 3MF package with generated loop geometry merged into each parent object.
 - 3MF export places the exported mesh data on the build plate with the lowest Z coordinate at `0`.
 - 3MF export should emit consistently wound, non-degenerate triangle shells so slicers can derive valid printable solids from triangle order.
-- Exports exclude UI-only overlays such as wireframes, hover highlights, selection outlines, loose-edge overlays, and adjustment handles.
+- Exports exclude UI-only overlays such as hover highlights, selection outlines, loose-edge overlays, and adjustment handles.
 - Exports include hidden objects and hidden generated geometry because hidden state is a runtime view concern.
 - Exports should avoid producing degenerate faces.
 

@@ -22,6 +22,7 @@ import {
 import {
   buildMeshTopology,
   colorTriangle,
+  getTriangleEdgeKeys,
   getTopologyEdgeNormalAngle,
   getTriangleVertices,
 } from "./mesh-topology";
@@ -153,8 +154,9 @@ export function unionLinkedFaceCacheTriangles(
 export function buildLinkedFaceSelectionCache(
   mesh: THREE.Mesh,
   seedTriangleIndex: number,
+  existingTopology: LinkedFaceSelectionCache["topology"] | null = null,
 ): LinkedFaceSelectionCache | null {
-  const topology = buildMeshTopology(mesh);
+  const topology = existingTopology?.mesh === mesh ? existingTopology : buildMeshTopology(mesh);
 
   if (!topology || !topology.triangles[seedTriangleIndex]) {
     return null;
@@ -269,7 +271,39 @@ export function createLinkedFaceSelectionFromCache(
   };
 }
 
-export function applyLinkedFaceSelectionColors(selection: LinkedFaceSelectionDetails | null) {
+const linkedFaceGradientBlue = new THREE.Color(0x1e3a8a);
+const linkedFaceGradientGreen = new THREE.Color(0x22c55e);
+const linkedFaceGradientRed = new THREE.Color(0xef4444);
+
+function getLinkedFaceSelectionGradientColor(
+  threshold: number,
+  maxThreshold: number,
+  target: THREE.Color,
+) {
+  const normalized = maxThreshold > 0 ? THREE.MathUtils.clamp(threshold / maxThreshold, 0, 1) : 0;
+
+  if (normalized < 0.5) {
+    return target.copy(linkedFaceGradientBlue).lerp(linkedFaceGradientGreen, normalized * 2);
+  }
+
+  return target.copy(linkedFaceGradientGreen).lerp(linkedFaceGradientRed, (normalized - 0.5) * 2);
+}
+
+function getLinkedFaceSelectionGraphStepIndex(cache: LinkedFaceSelectionCache, threshold: number) {
+  if (threshold <= 0 || cache.interval <= 0) {
+    return 0;
+  }
+
+  return Math.min(
+    Math.max(Math.ceil((threshold - Number.EPSILON) / cache.interval), 0),
+    cache.counts.length - 1,
+  );
+}
+
+export function applyLinkedFaceSelectionColors(
+  selection: LinkedFaceSelectionDetails | null,
+  cache: LinkedFaceSelectionCache | null = null,
+) {
   if (!selection) {
     return;
   }
@@ -280,9 +314,35 @@ export function applyLinkedFaceSelectionColors(selection: LinkedFaceSelectionDet
     return;
   }
 
-  selection.selectedTriangleIndexes.forEach((triangleIndex) => {
-    colorTriangle(color, triangleIndex * 3, linkedFaceSelectionColor);
-  });
+  if (
+    cache &&
+    cache.mesh === selection.mesh &&
+    cache.objectId === selection.objectId &&
+    cache.seedTriangleIndex === selection.seedTriangleIndex
+  ) {
+    const gradientColor = new THREE.Color();
+    const maxThreshold = cache.maxThreshold;
+
+    cache.thresholdByTriangle.forEach((threshold, triangleIndex) => {
+      if (!Number.isFinite(threshold) || triangleIndex * 3 + 2 >= color.count) {
+        return;
+      }
+
+      const stepIndex = getLinkedFaceSelectionGraphStepIndex(cache, threshold);
+      const graphThreshold = stepIndex * cache.interval;
+
+      colorTriangle(
+        color,
+        triangleIndex * 3,
+        getLinkedFaceSelectionGradientColor(graphThreshold, maxThreshold, gradientColor),
+      );
+    });
+  } else {
+    selection.selectedTriangleIndexes.forEach((triangleIndex) => {
+      colorTriangle(color, triangleIndex * 3, linkedFaceSelectionColor);
+    });
+  }
+
   color.needsUpdate = true;
 }
 
@@ -539,6 +599,63 @@ export function getBoundaryLoopRegionTriangleIndexes(
   return regionTriangleIndexes;
 }
 
+function replaceTopologyTriangleEdgeKeys(
+  topology: LinkedFaceSelectionDetails["topology"],
+  triangleIndex: number,
+  nextEdgeKeys: string[],
+) {
+  const triangle = topology.triangles[triangleIndex];
+
+  if (!triangle) {
+    return;
+  }
+
+  triangle.edgeKeys.forEach((edgeKey) => {
+    const triangleIndexes = topology.edgeToTriangles.get(edgeKey);
+
+    if (!triangleIndexes) {
+      return;
+    }
+
+    const index = triangleIndexes.indexOf(triangleIndex);
+
+    if (index >= 0) {
+      triangleIndexes.splice(index, 1);
+    }
+
+    if (triangleIndexes.length === 0) {
+      topology.edgeToTriangles.delete(edgeKey);
+    }
+  });
+
+  triangle.edgeKeys = nextEdgeKeys;
+  nextEdgeKeys.forEach((edgeKey) => {
+    const triangleIndexes = topology.edgeToTriangles.get(edgeKey);
+
+    if (triangleIndexes) {
+      triangleIndexes.push(triangleIndex);
+    } else {
+      topology.edgeToTriangles.set(edgeKey, [triangleIndex]);
+    }
+  });
+}
+
+function refreshCutRegionTopology(
+  topology: LinkedFaceSelectionDetails["topology"],
+  regionTriangleIndexes: Set<number>,
+) {
+  regionTriangleIndexes.forEach((triangleIndex) => {
+    const vertices = getTriangleVertices(topology.position, triangleIndex * 3);
+
+    if (!vertices) {
+      return;
+    }
+
+    topology.triangles[triangleIndex].vertices = vertices;
+    replaceTopologyTriangleEdgeKeys(topology, triangleIndex, getTriangleEdgeKeys(vertices));
+  });
+}
+
 export function cutSelectionBoundaryLoopTopology(
   selection: LinkedFaceSelectionDetails,
   loop: SelectionBoundaryLoop,
@@ -599,6 +716,10 @@ export function cutSelectionBoundaryLoopTopology(
       changed = true;
     });
   });
+
+  if (changed) {
+    refreshCutRegionTopology(selection.topology, regionTriangleIndexes);
+  }
 
   return changed;
 }

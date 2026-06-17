@@ -3,6 +3,7 @@
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { useModelViewerScene } from "./model-viewer-scene";
 import type { ViewerCamera } from "./model-viewer-scene-types";
+import type { SeparationCameraState } from "./model-viewer-selection-types";
 import { useModelViewerLoopCaps } from "./model-viewer-loop-caps";
 import { useModelViewerSelection } from "./model-viewer-selection";
 import * as THREE from "three";
@@ -26,7 +27,6 @@ import {
   modelHasSourceTextureMaps,
   refreshObjectMaterialGroups,
   styleModel,
-  refreshObjectWireframes,
   refreshObjectOutlines,
   refreshLooseEdgeOverlays,
   setLooseEdgeLoopColor,
@@ -189,6 +189,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   >(null);
   const cameraRef = useRef<ViewerCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const separationCameraAnimationFrameRef = useRef<number | null>(null);
+  const separationCameraStateRef = useRef<SeparationCameraState | null>(null);
   const hoveredEdgeRef = useRef<HoveredEdge | null>(null);
   const cameraModeRef = useRef<CameraMode>("perspective");
   const toggleCameraModeHandlerRef = useRef<(() => void) | null>(null);
@@ -528,6 +530,11 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     setAutoNameBusy(false);
     clearAutoNameDebugView();
     clearScheduledPersistenceSave();
+    if (separationCameraAnimationFrameRef.current != null) {
+      window.cancelAnimationFrame(separationCameraAnimationFrameRef.current);
+      separationCameraAnimationFrameRef.current = null;
+    }
+    separationCameraStateRef.current = null;
     clearViewerHistory();
     currentModelSourceRef.current = null;
     persistenceSaveFailedRef.current = false;
@@ -576,10 +583,13 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     undoLastViewerAction,
   } = useModelViewerSelection({
     mountRef,
+    cameraRef,
+    controlsRef,
     rootRef,
+    separationCameraAnimationFrameRef,
+    separationCameraStateRef,
     linkedFaceSelectionRef,
     linkedFaceSelectionCacheRef,
-    linkedFaceSelectionOverlayRef,
     selectionBoundaryLoopsRef,
     selectionBoundaryLoopOverlayRef,
     linkedFaceSelectionThresholdRef,
@@ -707,7 +717,6 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     hoveredEdgeRef.current = null;
     refreshObjectMaterialGroups(model, hiddenObjectIdsRef.current);
     applyObjectColors(model, hiddenObjectIdsRef.current);
-    refreshObjectWireframes(model, hiddenObjectIdsRef.current, separateModeActiveRef.current);
     refreshViewportObjectOutlines(model);
     refreshLooseEdgeOverlays(model, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
 
