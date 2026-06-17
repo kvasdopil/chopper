@@ -3,16 +3,25 @@ import * as THREE from "three";
 const contentTypesPath = "[Content_Types].xml";
 const relationshipsPath = "_rels/.rels";
 const modelPath = "3D/3dmodel.model";
+const triangleAreaEpsilon = 1e-18;
+const orientationScoreEpsilon = 1e-12;
 
 type ZipEntry = {
   data: Uint8Array;
   name: string;
 };
 
+type ThreeMfTriangle = [number, number, number];
+
 type ThreeMfMesh = {
   name: string;
-  triangles: Array<[number, number, number]>;
+  triangles: ThreeMfTriangle[];
   vertices: THREE.Vector3[];
+};
+
+type TriangleEdgeRecord = {
+  direction: 1 | -1;
+  triangleIndex: number;
 };
 
 const crc32Table = new Uint32Array(256);
@@ -158,10 +167,12 @@ function formatNumber(value: number) {
     return "0";
   }
 
-  return Number(value.toFixed(6)).toString();
+  const rounded = Number(value.toFixed(6));
+
+  return Object.is(rounded, -0) ? "0" : rounded.toString();
 }
 
-function triangleHasArea(
+function getTriangleAreaSquared(
   vertices: THREE.Vector3[],
   firstIndex: number,
   secondIndex: number,
@@ -172,15 +183,230 @@ function triangleHasArea(
   const third = vertices[thirdIndex];
 
   if (!first || !second || !third) {
-    return false;
+    return 0;
   }
 
+  return new THREE.Vector3()
+    .subVectors(second, first)
+    .cross(new THREE.Vector3().subVectors(third, first))
+    .lengthSq();
+}
+
+function triangleHasArea(
+  vertices: THREE.Vector3[],
+  firstIndex: number,
+  secondIndex: number,
+  thirdIndex: number,
+) {
   return (
-    new THREE.Vector3()
-      .subVectors(second, first)
-      .cross(new THREE.Vector3().subVectors(third, first))
-      .lengthSq() > 0
+    getTriangleAreaSquared(vertices, firstIndex, secondIndex, thirdIndex) > triangleAreaEpsilon
   );
+}
+
+function getTriangleEdges([firstIndex, secondIndex, thirdIndex]: ThreeMfTriangle): Array<
+  [number, number]
+> {
+  return [
+    [firstIndex, secondIndex],
+    [secondIndex, thirdIndex],
+    [thirdIndex, firstIndex],
+  ];
+}
+
+function getTriangleEdgeKey(firstIndex: number, secondIndex: number) {
+  return firstIndex < secondIndex ? `${firstIndex}:${secondIndex}` : `${secondIndex}:${firstIndex}`;
+}
+
+function getTriangleEdgeDirection(firstIndex: number, secondIndex: number): 1 | -1 {
+  return firstIndex < secondIndex ? 1 : -1;
+}
+
+function getFlippedTriangle([
+  firstIndex,
+  secondIndex,
+  thirdIndex,
+]: ThreeMfTriangle): ThreeMfTriangle {
+  return [firstIndex, thirdIndex, secondIndex];
+}
+
+function getOrientedTriangle(triangle: ThreeMfTriangle, flipped: boolean) {
+  return flipped ? getFlippedTriangle(triangle) : triangle;
+}
+
+function getComponentOrientationScore(vertices: THREE.Vector3[], triangles: ThreeMfTriangle[]) {
+  const bounds = new THREE.Box3();
+  const componentVertexIndexes = new Set<number>();
+
+  triangles.forEach((triangle) => {
+    triangle.forEach((vertexIndex) => {
+      if (componentVertexIndexes.has(vertexIndex)) {
+        return;
+      }
+
+      const vertex = vertices[vertexIndex];
+
+      if (!vertex) {
+        return;
+      }
+
+      componentVertexIndexes.add(vertexIndex);
+      bounds.expandByPoint(vertex);
+    });
+  });
+
+  if (bounds.isEmpty()) {
+    return 0;
+  }
+
+  const center = bounds.getCenter(new THREE.Vector3());
+  let score = 0;
+
+  triangles.forEach(([firstIndex, secondIndex, thirdIndex]) => {
+    const first = vertices[firstIndex];
+    const second = vertices[secondIndex];
+    const third = vertices[thirdIndex];
+
+    if (!first || !second || !third) {
+      return;
+    }
+
+    const normal = new THREE.Vector3()
+      .subVectors(second, first)
+      .cross(new THREE.Vector3().subVectors(third, first));
+    const triangleCenter = first
+      .clone()
+      .add(second)
+      .add(third)
+      .multiplyScalar(1 / 3);
+
+    score += normal.dot(triangleCenter.sub(center));
+  });
+
+  return score;
+}
+
+function orientTriangleShells(vertices: THREE.Vector3[], triangles: ThreeMfTriangle[]) {
+  const edgeRecordsByKey = new Map<string, TriangleEdgeRecord[]>();
+
+  triangles.forEach((triangle, triangleIndex) => {
+    getTriangleEdges(triangle).forEach(([firstIndex, secondIndex]) => {
+      const edgeKey = getTriangleEdgeKey(firstIndex, secondIndex);
+      const record = {
+        direction: getTriangleEdgeDirection(firstIndex, secondIndex),
+        triangleIndex,
+      };
+      const records = edgeRecordsByKey.get(edgeKey);
+
+      if (records) {
+        records.push(record);
+      } else {
+        edgeRecordsByKey.set(edgeKey, [record]);
+      }
+    });
+  });
+
+  const visited = new Array<boolean>(triangles.length).fill(false);
+  const flipped = new Array<boolean>(triangles.length).fill(false);
+
+  for (let startTriangleIndex = 0; startTriangleIndex < triangles.length; startTriangleIndex += 1) {
+    if (visited[startTriangleIndex]) {
+      continue;
+    }
+
+    const queue = [startTriangleIndex];
+    const componentTriangleIndexes: number[] = [];
+
+    visited[startTriangleIndex] = true;
+
+    for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+      const triangleIndex = queue[queueIndex];
+      const triangle = triangles[triangleIndex];
+
+      componentTriangleIndexes.push(triangleIndex);
+
+      getTriangleEdges(triangle).forEach(([firstIndex, secondIndex]) => {
+        const edgeKey = getTriangleEdgeKey(firstIndex, secondIndex);
+        const records = edgeRecordsByKey.get(edgeKey);
+
+        if (!records) {
+          return;
+        }
+
+        const currentDirection =
+          getTriangleEdgeDirection(firstIndex, secondIndex) * (flipped[triangleIndex] ? -1 : 1);
+
+        records.forEach((record) => {
+          if (record.triangleIndex === triangleIndex || visited[record.triangleIndex]) {
+            return;
+          }
+
+          flipped[record.triangleIndex] = -currentDirection / record.direction < 0;
+          visited[record.triangleIndex] = true;
+          queue.push(record.triangleIndex);
+        });
+      });
+    }
+
+    const componentTriangles = componentTriangleIndexes.map((triangleIndex) =>
+      getOrientedTriangle(triangles[triangleIndex], flipped[triangleIndex]),
+    );
+    const orientationScore = getComponentOrientationScore(vertices, componentTriangles);
+
+    if (orientationScore < -orientationScoreEpsilon) {
+      componentTriangleIndexes.forEach((triangleIndex) => {
+        flipped[triangleIndex] = !flipped[triangleIndex];
+      });
+    }
+  }
+
+  return triangles.map((triangle, triangleIndex) =>
+    getOrientedTriangle(triangle, flipped[triangleIndex]),
+  );
+}
+
+function compactMeshTriangles(
+  name: string,
+  sourceVertices: THREE.Vector3[],
+  sourceTriangles: ThreeMfTriangle[],
+) {
+  const vertexIndexBySourceIndex = new Map<number, number>();
+  const vertices: THREE.Vector3[] = [];
+  const triangles: ThreeMfTriangle[] = [];
+  const getVertexIndex = (sourceIndex: number) => {
+    const existingIndex = vertexIndexBySourceIndex.get(sourceIndex);
+
+    if (existingIndex !== undefined) {
+      return existingIndex;
+    }
+
+    const vertexIndex = vertices.length;
+    const vertex = sourceVertices[sourceIndex];
+
+    vertexIndexBySourceIndex.set(sourceIndex, vertexIndex);
+    vertices.push(vertex.clone());
+
+    return vertexIndex;
+  };
+
+  sourceTriangles.forEach(([firstIndex, secondIndex, thirdIndex]) => {
+    if (!triangleHasArea(sourceVertices, firstIndex, secondIndex, thirdIndex)) {
+      return;
+    }
+
+    triangles.push([
+      getVertexIndex(firstIndex),
+      getVertexIndex(secondIndex),
+      getVertexIndex(thirdIndex),
+    ]);
+  });
+
+  return triangles.length > 0 ? { name, triangles, vertices } : null;
+}
+
+function createRepairedMesh(name: string, vertices: THREE.Vector3[], triangles: ThreeMfTriangle[]) {
+  const orientedTriangles = orientTriangleShells(vertices, triangles);
+
+  return compactMeshTriangles(name, vertices, orientedTriangles);
 }
 
 function getMeshTriangles(mesh: THREE.Mesh): ThreeMfMesh | null {
@@ -192,9 +418,11 @@ function getMeshTriangles(mesh: THREE.Mesh): ThreeMfMesh | null {
 
   const index = mesh.geometry.getIndex();
   const vertices: THREE.Vector3[] = [];
-  const triangles: Array<[number, number, number]> = [];
+  const triangles: ThreeMfTriangle[] = [];
 
   mesh.updateMatrixWorld(true);
+
+  const shouldFlipWinding = mesh.matrixWorld.determinant() < 0;
 
   for (let vertexIndex = 0; vertexIndex < position.count; vertexIndex += 1) {
     vertices.push(
@@ -209,23 +437,27 @@ function getMeshTriangles(mesh: THREE.Mesh): ThreeMfMesh | null {
       const thirdIndex = index.getX(itemIndex + 2);
 
       if (triangleHasArea(vertices, firstIndex, secondIndex, thirdIndex)) {
-        triangles.push([firstIndex, secondIndex, thirdIndex]);
+        triangles.push(
+          shouldFlipWinding
+            ? [firstIndex, thirdIndex, secondIndex]
+            : [firstIndex, secondIndex, thirdIndex],
+        );
       }
     }
   } else {
     for (let vertexIndex = 0; vertexIndex + 2 < position.count; vertexIndex += 3) {
       if (triangleHasArea(vertices, vertexIndex, vertexIndex + 1, vertexIndex + 2)) {
-        triangles.push([vertexIndex, vertexIndex + 1, vertexIndex + 2]);
+        triangles.push(
+          shouldFlipWinding
+            ? [vertexIndex, vertexIndex + 2, vertexIndex + 1]
+            : [vertexIndex, vertexIndex + 1, vertexIndex + 2],
+        );
       }
     }
   }
 
   return triangles.length > 0
-    ? {
-        name: mesh.name.trim() || "Object",
-        triangles,
-        vertices,
-      }
+    ? createRepairedMesh(mesh.name.trim() || "Object", vertices, triangles)
     : null;
 }
 
@@ -243,6 +475,26 @@ function getSceneMeshes(scene: THREE.Scene) {
   });
 
   return meshes;
+}
+
+function moveMeshesToBuildPlate(meshes: ThreeMfMesh[]) {
+  let minZ = Infinity;
+
+  meshes.forEach((mesh) => {
+    mesh.vertices.forEach((vertex) => {
+      minZ = Math.min(minZ, vertex.z);
+    });
+  });
+
+  if (!Number.isFinite(minZ) || Math.abs(minZ) <= 0.0000005) {
+    return;
+  }
+
+  meshes.forEach((mesh) => {
+    mesh.vertices.forEach((vertex) => {
+      vertex.z -= minZ;
+    });
+  });
 }
 
 function createContentTypesXml() {
@@ -309,6 +561,8 @@ export function createThreeMfPackage(scene: THREE.Scene) {
   if (meshes.length === 0) {
     return null;
   }
+
+  moveMeshesToBuildPlate(meshes);
 
   return createStoredZip([
     { name: contentTypesPath, data: encodeText(createContentTypesXml()) },
