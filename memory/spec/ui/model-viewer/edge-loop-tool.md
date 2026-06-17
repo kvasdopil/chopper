@@ -72,7 +72,8 @@ Related documents:
 - If a selected contact span has exactly one matching span on another object with the same visual boundary, the two spans are edited as one paired boundary.
 - Changing mode, cone, offset, or normal target on either side updates generated geometry for both objects.
 - Each object still owns its own generated geometry for visibility and export.
-- Paired normal-axis edits stay aligned across the shared boundary.
+- Paired fixed-axis edits use the same signed X, Y, or Z axis on both objects rather than reorienting per object.
+- Paired normal-axis edits copy the selected loop target's world-space displacement so both visible caps use the same length.
 
 ## Viewport Adjustment
 
@@ -81,6 +82,9 @@ Related documents:
 - Fixed-axis extrusion and cylinder modes show a draggable viewport arrow on the signed offset side.
 - Normal-axis extrusion and cylinder modes show a three-axis translate handle at the normal-axis target.
 - Dragging an adjustment handle updates the stored offset or normal target and regenerates the selected loop geometry.
+- The normal-axis target is initialized once when a loop first enters a normal-axis extrusion or cylinder mode.
+- After initialization, the normal-axis offset is the direct distance from the loop center to the stored target point and is not clamped by object geometry.
+- After the normal-axis target is moved, switching away from a normal axis and back restores the remembered target instead of recalculating it.
 - Dragging outside adjustment handles preserves normal camera orbit and pan behavior.
 
 ## Generated-Geometry Display

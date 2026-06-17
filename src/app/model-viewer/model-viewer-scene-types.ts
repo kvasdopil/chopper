@@ -12,14 +12,17 @@ import type {
   ViewerHistorySnapshot,
 } from "./model-viewer-core";
 import type { LoadState } from "../viewer-controls/types";
+import type { CameraMode } from "../viewer-controls/camera-mode-toggle";
 
 export type MutableRef<T> = {
   current: T;
 };
 
+export type ViewerCamera = THREE.PerspectiveCamera | THREE.OrthographicCamera;
+
 export type ModelViewerSceneParams = {
   mountRef: MutableRef<HTMLDivElement | null>;
-  cameraRef: MutableRef<THREE.PerspectiveCamera | null>;
+  cameraRef: MutableRef<ViewerCamera | null>;
   controlsRef: MutableRef<OrbitControls | null>;
   loaderRef: MutableRef<GLTFLoader | null>;
   rootRef: MutableRef<THREE.Group | null>;
@@ -42,8 +45,10 @@ export type ModelViewerSceneParams = {
   isEdgeLoopCapToolEnabledRef: MutableRef<boolean>;
   isSeparationToolEnabledRef: MutableRef<boolean>;
   looseEdgeLoopCapStatesRef: MutableRef<Map<string, LooseEdgeLoopCapState>>;
+  cameraModeRef: MutableRef<CameraMode>;
   persistenceSaveTimeoutRef: MutableRef<number | null>;
   toastTimeoutRef: MutableRef<number | null>;
+  toggleCameraModeHandlerRef: MutableRef<(() => void) | null>;
   setLooseEdgeLoopCapTargetHandlerRef: MutableRef<
     ((edge: HoveredEdge, target: THREE.Vector3) => void) | null
   >;
@@ -72,7 +77,7 @@ export type ModelViewerSceneParams = {
   restorePersistedViewerStateHandlerRef: MutableRef<
     | ((
         modelRoot: THREE.Group,
-        camera: THREE.PerspectiveCamera,
+        camera: ViewerCamera,
         controls: OrbitControls,
         loader: GLTFLoader,
         isCancelled: () => boolean,
@@ -83,6 +88,7 @@ export type ModelViewerSceneParams = {
   pushViewerHistorySnapshot: (snapshot: ViewerHistorySnapshot | null) => void;
   removeCapOffsetGizmo: () => void;
   rememberTriangleSelection: (mesh: THREE.Mesh, triangleIndex: number) => void;
+  setCameraMode: (mode: CameraMode) => void;
   setLoadState: (state: LoadState) => void;
   setStatusText: (text: string) => void;
 };

@@ -97,7 +97,7 @@ export function LinkedFaceSelectionPanel({
     : null;
 
   return (
-    <div className="pointer-events-none absolute bottom-4 left-4 flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-3 text-sm text-neutral-700">
+    <div className="pointer-events-none absolute bottom-4 left-[216px] flex w-72 max-w-[calc(100vw-15rem)] flex-col gap-3 text-sm text-neutral-700">
       <div className="pointer-events-auto rounded-md bg-white/85 px-3 py-2 shadow-sm backdrop-blur">
         <div className="flex items-center justify-between gap-3">
           <button

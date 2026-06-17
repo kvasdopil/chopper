@@ -34,6 +34,8 @@ import {
 } from "./model-viewer-shared";
 import { colorTriangle } from "./mesh-topology";
 import { getLooseEdgeLoopCacheKey } from "./loose-edge-loops";
+import { editorGlbMetadataVersion } from "./editor-metadata";
+import type { EditorMetadata } from "./editor-metadata";
 
 export function applyObjectColors(model: THREE.Object3D, hiddenObjectIds = new Set<number>()) {
   model.updateMatrixWorld(true);
@@ -100,15 +102,20 @@ export function normalizeModel(model: THREE.Object3D) {
 }
 
 export function frameModel(
-  camera: THREE.PerspectiveCamera,
+  camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
   controls: OrbitControls,
   model: THREE.Object3D,
 ) {
   const box = new THREE.Box3().setFromObject(model);
   const sphere = box.getBoundingSphere(new THREE.Sphere());
   const radius = Math.max(sphere.radius, 1);
-  const verticalFov = THREE.MathUtils.degToRad(camera.fov);
-  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect);
+  const aspect =
+    camera instanceof THREE.PerspectiveCamera
+      ? camera.aspect
+      : (camera.right - camera.left) / (camera.top - camera.bottom);
+  const verticalFov =
+    camera instanceof THREE.PerspectiveCamera ? THREE.MathUtils.degToRad(camera.fov) : Math.PI / 4;
+  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
   const fitFov = Math.min(verticalFov, horizontalFov);
   const distance = (radius / Math.sin(fitFov / 2)) * 1.15;
 
@@ -116,6 +123,11 @@ export function frameModel(
   camera.position.copy(sphere.center).add(defaultViewDirection.clone().multiplyScalar(distance));
   camera.near = cameraNearPlane;
   camera.far = distance * 100;
+
+  if (camera instanceof THREE.OrthographicCamera) {
+    camera.zoom = Math.max(0.01, targetModelSize / (radius * 2.4));
+  }
+
   camera.updateProjectionMatrix();
   controls.update();
 }
@@ -182,6 +194,9 @@ export function getPersistedLoopCapState(
     cone: state.cone,
     meshIndex,
     mode: state.mode,
+    normalAxisTarget: state.normalAxisTarget
+      ? [state.normalAxisTarget.x, state.normalAxisTarget.y, state.normalAxisTarget.z]
+      : null,
     normalTarget: state.normalTarget
       ? [state.normalTarget.x, state.normalTarget.y, state.normalTarget.z]
       : null,
@@ -213,14 +228,27 @@ export function createPersistedViewerState(
     }
   });
 
+  const persistedHiddenObjectIds = Array.from(hiddenObjectIds).sort(
+    (first, second) => first - second,
+  );
+  const persistedObjectNames = Object.fromEntries(
+    Object.entries(objectNames).map(([objectId, name]) => [String(objectId), name]),
+  );
+  const metadata: EditorMetadata = {
+    hiddenObjectIds: persistedHiddenObjectIds,
+    loopCapStates: persistedLoopCapStates,
+    nextObjectId,
+    objectNames: persistedObjectNames,
+    version: editorGlbMetadataVersion,
+  };
+
   return {
-    hiddenObjectIds: Array.from(hiddenObjectIds).sort((first, second) => first - second),
+    hiddenObjectIds: persistedHiddenObjectIds,
     loopCapStates: persistedLoopCapStates,
     meshes: meshStates,
+    metadata,
     nextObjectId,
-    objectNames: Object.fromEntries(
-      Object.entries(objectNames).map(([objectId, name]) => [String(objectId), name]),
-    ),
+    objectNames: persistedObjectNames,
     savedAt: Date.now(),
     source: {
       ...source,

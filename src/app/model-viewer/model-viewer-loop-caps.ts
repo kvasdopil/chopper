@@ -177,22 +177,16 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     );
   };
 
-  const getLoopWorldAxis = (edge: HoveredEdge, localAxis: THREE.Vector3) => {
-    edge.mesh.updateMatrixWorld(true);
-
-    return localAxis.clone().transformDirection(edge.mesh.matrixWorld).normalize();
-  };
-
   const getMirroredLoopNormalTarget = (
     sourceEdge: HoveredEdge,
     memberEdge: HoveredEdge,
-    sourceAxisWorld: THREE.Vector3,
+    sourceAxis: THREE.Vector3,
     offset: number,
   ) => {
     const sourceData = getLooseEdgeLoopFillData(sourceEdge);
     const memberData = getLooseEdgeLoopFillData(memberEdge);
 
-    if (!sourceData || !memberData || sourceAxisWorld.lengthSq() === 0) {
+    if (!sourceData || !memberData || sourceAxis.lengthSq() === 0) {
       return null;
     }
 
@@ -200,8 +194,13 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     memberEdge.mesh.updateMatrixWorld(true);
 
     const targetDistance = Math.max(Math.abs(offset), 0.001);
+    const sourceCenterWorld = sourceEdge.mesh.localToWorld(sourceData.center.clone());
+    const sourceTargetWorld = sourceEdge.mesh.localToWorld(
+      sourceData.center.clone().addScaledVector(sourceAxis, targetDistance),
+    );
+    const sourceOffsetWorld = sourceTargetWorld.sub(sourceCenterWorld);
     const memberCenterWorld = memberEdge.mesh.localToWorld(memberData.center.clone());
-    const targetWorld = memberCenterWorld.addScaledVector(sourceAxisWorld, targetDistance);
+    const targetWorld = memberCenterWorld.add(sourceOffsetWorld);
 
     return memberEdge.mesh.worldToLocal(targetWorld);
   };
@@ -389,12 +388,29 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       removeLooseEdgeLoopCapFill(state);
     }
 
-    state.offset = clampLooseEdgeLoopCapOffset(edge, state.mode, state.offset, state.normalTarget);
+    if (isNormalTargetLoopMode(state.mode)) {
+      if (state.normalTarget) {
+        state.offset = state.normalTarget.distanceTo(axisData.data.center);
+      } else {
+        state.offset = clampLooseEdgeLoopCapOffset(
+          edge,
+          state.mode,
+          state.offset,
+          state.normalTarget,
+        );
+        state.normalTarget = axisData.data.center
+          .clone()
+          .addScaledVector(axisData.axis, Math.max(Math.abs(state.offset), 0.001));
+      }
 
-    if (state.mode !== "fill" && (state.normalTarget || isNormalTargetLoopMode(state.mode))) {
-      state.normalTarget = axisData.data.center
-        .clone()
-        .addScaledVector(axisData.axis, Math.max(Math.abs(state.offset), 0.001));
+      state.normalAxisTarget = state.normalTarget.clone();
+    } else {
+      state.offset = clampLooseEdgeLoopCapOffset(
+        edge,
+        state.mode,
+        state.offset,
+        state.normalTarget,
+      );
     }
 
     const fill = createLooseEdgeLoopFill(
@@ -457,7 +473,18 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
               capState.normalTarget[2],
             )
           : null;
-      const axisData = getLooseEdgeLoopCapAxisData(edge, capState.mode, normalTarget);
+      const normalAxisTarget = capState.normalAxisTarget
+        ? new THREE.Vector3(
+            capState.normalAxisTarget[0],
+            capState.normalAxisTarget[1],
+            capState.normalAxisTarget[2],
+          )
+        : isNormalTargetLoopMode(capState.mode) && normalTarget
+          ? normalTarget.clone()
+          : null;
+      const axisTarget =
+        isNormalTargetLoopMode(capState.mode) && !normalTarget ? normalAxisTarget : normalTarget;
+      const axisData = getLooseEdgeLoopCapAxisData(edge, capState.mode, axisTarget);
 
       if (!axisData) {
         hadInvalidState = true;
@@ -468,7 +495,8 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
         cone: capState.cone === true,
         fill: null,
         mode: capState.mode,
-        normalTarget,
+        normalAxisTarget,
+        normalTarget: axisTarget,
         objectId: edge.objectId,
         occlusionOverlay: null,
         offset: capState.mode === "fill" ? 0 : capState.offset,
@@ -486,6 +514,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
         state.normalTarget = axisData.data.center
           .clone()
           .addScaledVector(axisData.axis, state.offset);
+        state.normalAxisTarget = state.normalTarget.clone();
       }
 
       rebuildLooseEdgeLoopCapFill(edge, key, state);
@@ -517,8 +546,8 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     }
 
     const requestedOffset = target.distanceTo(axisData.data.center);
-    const nextOffset = clampLooseEdgeLoopCapOffset(edge, state.mode, requestedOffset, target);
-    const nextTarget = axisData.data.center.clone().addScaledVector(axisData.axis, nextOffset);
+    const nextOffset = requestedOffset;
+    const nextTarget = target.clone();
     const missingMemberState = members.some(
       (member) => !looseEdgeLoopCapStatesRef.current.has(member.key),
     );
@@ -527,18 +556,19 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       !missingMemberState &&
       Math.abs(nextOffset - state.offset) < 0.0001 &&
       state.normalTarget &&
-      nextTarget.distanceToSquared(state.normalTarget) < 0.000001
+      state.normalAxisTarget &&
+      nextTarget.distanceToSquared(state.normalTarget) < 0.000001 &&
+      nextTarget.distanceToSquared(state.normalAxisTarget) < 0.000001
     ) {
       return;
     }
-
-    const sourceAxisWorld = getLoopWorldAxis(edge, axisData.axis);
 
     members.forEach((member) => {
       const memberState = looseEdgeLoopCapStatesRef.current.get(member.key) ?? {
         cone: state.cone,
         fill: null,
         mode: state.mode,
+        normalAxisTarget: null,
         normalTarget: null,
         objectId: member.edge.objectId,
         occlusionOverlay: null,
@@ -551,15 +581,17 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       memberState.objectId = member.edge.objectId;
       memberState.sourceMeshUuid = member.edge.mesh.uuid;
       memberState.offset = nextOffset;
-      memberState.normalTarget = getMirroredLoopNormalTarget(
-        edge,
-        member.edge,
-        sourceAxisWorld,
-        nextOffset,
-      );
+      memberState.normalTarget = isSameLooseEdgeLoop(member.edge, edge)
+        ? nextTarget.clone()
+        : getMirroredLoopNormalTarget(edge, member.edge, axisData.axis, nextOffset);
+      memberState.normalAxisTarget = memberState.normalTarget
+        ? memberState.normalTarget.clone()
+        : null;
       rebuildLooseEdgeLoopCapFill(member.edge, member.key, memberState);
     });
-    refreshCapOffsetGizmo(edge);
+    if (capNormalTransformControlsRef.current?.dragging !== true) {
+      refreshCapOffsetGizmo(edge);
+    }
     schedulePersistViewerState();
   };
 
@@ -620,14 +652,16 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     const members = getLooseEdgeLoopMembers(edge);
     const existingState = getLooseEdgeLoopCapState(edge);
     const existingMode = existingState?.mode;
-    const shouldPreserveExistingAxisTarget =
-      existingMode === mode ||
-      (existingMode != null &&
-        isNormalTargetLoopMode(existingMode) &&
-        isNormalTargetLoopMode(mode));
-    const existingAxisTarget = shouldPreserveExistingAxisTarget
-      ? (existingState?.normalTarget ?? null)
-      : null;
+    const rememberedNormalAxisTarget =
+      existingState?.normalAxisTarget ??
+      (existingState && isNormalTargetLoopMode(existingState.mode)
+        ? existingState.normalTarget
+        : null);
+    const existingAxisTarget = isNormalTargetLoopMode(mode)
+      ? rememberedNormalAxisTarget
+      : existingMode === mode
+        ? (existingState?.normalTarget ?? null)
+        : null;
     const axisData =
       mode === "none" ? null : getLooseEdgeLoopCapAxisData(edge, mode, existingAxisTarget);
 
@@ -664,22 +698,29 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
     }
 
+    const rememberedNormalOffset =
+      isNormalTargetLoopMode(mode) && existingAxisTarget
+        ? existingAxisTarget.distanceTo(axisData.data.center)
+        : null;
     const nextOffset =
       mode === "fill"
         ? 0
         : existingMode === mode && existingState && Number.isFinite(existingState.offset)
           ? existingState.offset
-          : axisData.defaultOffset;
+          : (rememberedNormalOffset ?? axisData.defaultOffset);
     const nextCone = supportsConeLoopMode(mode) ? (existingState?.cone ?? false) : false;
     const shouldStoreAxisTarget =
       mode !== "fill" && (members.length > 1 || isNormalTargetLoopMode(mode));
-    const sourceAxisWorld = shouldStoreAxisTarget ? getLoopWorldAxis(edge, axisData.axis) : null;
 
     members.forEach((member) => {
       const memberState = looseEdgeLoopCapStatesRef.current.get(member.key) ?? {
         cone: nextCone,
         fill: null,
         mode,
+        normalAxisTarget:
+          isSameLooseEdgeLoop(member.edge, edge) && rememberedNormalAxisTarget
+            ? rememberedNormalAxisTarget.clone()
+            : null,
         normalTarget: null,
         objectId: member.edge.objectId,
         occlusionOverlay: null,
@@ -692,10 +733,18 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       memberState.objectId = member.edge.objectId;
       memberState.sourceMeshUuid = member.edge.mesh.uuid;
       memberState.offset = nextOffset;
-      memberState.normalTarget =
-        sourceAxisWorld && shouldStoreAxisTarget
-          ? getMirroredLoopNormalTarget(edge, member.edge, sourceAxisWorld, nextOffset)
+      memberState.normalTarget = shouldStoreAxisTarget
+        ? isNormalTargetLoopMode(mode) &&
+          isSameLooseEdgeLoop(member.edge, edge) &&
+          rememberedNormalAxisTarget
+          ? rememberedNormalAxisTarget.clone()
+          : getMirroredLoopNormalTarget(edge, member.edge, axisData.axis, nextOffset)
+        : null;
+      if (isNormalTargetLoopMode(mode)) {
+        memberState.normalAxisTarget = memberState.normalTarget
+          ? memberState.normalTarget.clone()
           : null;
+      }
 
       rebuildLooseEdgeLoopCapFill(member.edge, member.key, memberState);
     });
@@ -732,6 +781,10 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
         cone,
         fill: null,
         mode: state.mode,
+        normalAxisTarget:
+          isSameLooseEdgeLoop(member.edge, edge) && state.normalAxisTarget
+            ? state.normalAxisTarget.clone()
+            : null,
         normalTarget:
           isSameLooseEdgeLoop(member.edge, edge) && state.normalTarget
             ? state.normalTarget.clone()
@@ -781,13 +834,21 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     const selectedAxisData = shouldStoreAxisTarget
       ? getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget)
       : null;
-    const sourceAxisWorld = selectedAxisData ? getLoopWorldAxis(edge, selectedAxisData.axis) : null;
+    const selectedTarget = selectedAxisData
+      ? selectedAxisData.data.center.clone().addScaledVector(selectedAxisData.axis, nextOffset)
+      : null;
+    const selectedAxisTarget = selectedAxisData
+      ? selectedAxisData.data.center
+          .clone()
+          .addScaledVector(selectedAxisData.axis, Math.max(Math.abs(nextOffset), 0.001))
+      : null;
 
     members.forEach((member) => {
       const memberState = looseEdgeLoopCapStatesRef.current.get(member.key) ?? {
         cone: state.cone,
         fill: null,
         mode: state.mode,
+        normalAxisTarget: null,
         normalTarget: null,
         objectId: member.edge.objectId,
         occlusionOverlay: null,
@@ -801,9 +862,20 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       memberState.sourceMeshUuid = member.edge.mesh.uuid;
       memberState.offset = nextOffset;
       memberState.normalTarget =
-        sourceAxisWorld && shouldStoreAxisTarget
-          ? getMirroredLoopNormalTarget(edge, member.edge, sourceAxisWorld, nextOffset)
+        selectedAxisData && shouldStoreAxisTarget
+          ? isNormalTargetLoopMode(state.mode) &&
+            isSameLooseEdgeLoop(member.edge, edge) &&
+            selectedTarget
+            ? selectedTarget.clone()
+            : isSameLooseEdgeLoop(member.edge, edge) && selectedAxisTarget
+              ? selectedAxisTarget.clone()
+              : getMirroredLoopNormalTarget(edge, member.edge, selectedAxisData.axis, nextOffset)
           : null;
+      if (isNormalTargetLoopMode(state.mode)) {
+        memberState.normalAxisTarget = memberState.normalTarget
+          ? memberState.normalTarget.clone()
+          : null;
+      }
 
       rebuildLooseEdgeLoopCapFill(member.edge, member.key, memberState);
     });

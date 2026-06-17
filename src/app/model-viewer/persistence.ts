@@ -1,4 +1,4 @@
-import type { LooseEdgeLoopMode } from "../viewer-controls/types";
+import type { EditorGlbLoopCapState, EditorMetadata } from "./editor-metadata";
 
 export const viewerPersistenceVersion = 1;
 
@@ -22,20 +22,13 @@ export type PersistedMeshState = {
   vertexTopologyIds?: Uint32Array;
 };
 
-export type PersistedLoopCapState = {
-  cone?: boolean;
-  meshIndex: number;
-  mode: LooseEdgeLoopMode;
-  normalTarget: [number, number, number] | null;
-  objectId: number;
-  offset: number;
-  segmentKeys: string[];
-};
+export type PersistedLoopCapState = EditorGlbLoopCapState;
 
 export type PersistedViewerState = {
   hiddenObjectIds: number[];
   loopCapStates: PersistedLoopCapState[];
   meshes: PersistedMeshState[];
+  metadata?: EditorMetadata;
   nextObjectId: number;
   objectNames: Record<string, string>;
   savedAt: number;

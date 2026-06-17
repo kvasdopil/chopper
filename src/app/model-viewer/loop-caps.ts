@@ -412,6 +412,7 @@ export function getLooseEdgeLoopExtrusionAxis(
   data: LooseEdgeLoopFillData,
 ) {
   const axis = new THREE.Vector3();
+  const shouldOrientOutward = mode === "extrude-normal" || mode === "cylinder-normal";
 
   if (mode === "extrude-x" || mode === "cylinder-x") {
     axis.set(1, 0, 0);
@@ -433,7 +434,11 @@ export function getLooseEdgeLoopExtrusionAxis(
 
   axis.normalize();
 
-  if (data.objectCenter && axis.dot(data.center.clone().sub(data.objectCenter)) < 0) {
+  if (
+    shouldOrientOutward &&
+    data.objectCenter &&
+    axis.dot(data.center.clone().sub(data.objectCenter)) < 0
+  ) {
     axis.negate();
   }
 

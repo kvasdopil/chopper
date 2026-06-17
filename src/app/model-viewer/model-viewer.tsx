@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { useModelViewerScene } from "./model-viewer-scene";
+import type { ViewerCamera } from "./model-viewer-scene-types";
 import { useModelViewerLoopCaps } from "./model-viewer-loop-caps";
 import { useModelViewerSelection } from "./model-viewer-selection";
 import * as THREE from "three";
@@ -42,6 +43,7 @@ import {
   applyPersistedMeshStates,
   getRestoredObjectNames,
   getBlenderExportFileName,
+  getThreeMfExportFileName,
   createBlenderExportScene,
   downloadArrayBuffer,
   type HoveredEdge,
@@ -63,11 +65,19 @@ import {
   type PersistedModelSource,
   type PersistedViewerState,
 } from "./persistence";
+import {
+  applyEditorGlbMeshStates,
+  getEditorGlbMetadata,
+  removeEditorGeneratedLoopMeshes,
+} from "./editor-metadata";
+import { createThreeMfPackage } from "./three-mf";
 import { EdgeLoopCapToolPanel } from "./tools/edge-loop-cap-tool";
 import { SeparationToolPanel } from "./tools/separation-tool";
 import type { ViewerTool, ViewerToolId } from "./tools";
 import { ObjectsPanel } from "../viewer-controls/objects-panel";
 import { TopBar } from "../viewer-controls/top-bar";
+import { CameraModeToggle, type CameraMode } from "../viewer-controls/camera-mode-toggle";
+import { TextureToggle } from "../viewer-controls/texture-toggle";
 import type {
   LinkedFaceSelectionGraph,
   LinkedFaceSelectionState,
@@ -152,7 +162,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const restorePersistedViewerStateHandlerRef = useRef<
     | ((
         modelRoot: THREE.Group,
-        camera: THREE.PerspectiveCamera,
+        camera: ViewerCamera,
         controls: OrbitControls,
         loader: GLTFLoader,
         isCancelled: () => boolean,
@@ -162,10 +172,14 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const selectLinkedFaceHandlerRef = useRef<
     ((mesh: THREE.Mesh, triangleIndex: number) => void) | null
   >(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const cameraRef = useRef<ViewerCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const hoveredEdgeRef = useRef<HoveredEdge | null>(null);
+  const cameraModeRef = useRef<CameraMode>("perspective");
+  const toggleCameraModeHandlerRef = useRef<(() => void) | null>(null);
+  const [cameraMode, setCameraMode] = useState<CameraMode>("perspective");
   const [exportBusy, setExportBusy] = useState(false);
+  const [exportThreeMfBusy, setExportThreeMfBusy] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("empty");
   const [statusText, setStatusText] = useState("No model loaded");
@@ -188,6 +202,11 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const [textureAvailable, setTextureAvailable] = useState(false);
   const [textureVisible, setTextureVisible] = useState(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
+
+  const setCameraModeState = (mode: CameraMode) => {
+    cameraModeRef.current = mode;
+    setCameraMode(mode);
+  };
 
   const showToast = (text: string) => {
     if (toastTimeoutRef.current != null) {
@@ -573,7 +592,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
   const loadModelIntoViewer = async (
     modelRoot: THREE.Group,
-    camera: THREE.PerspectiveCamera,
+    camera: ViewerCamera,
     controls: OrbitControls,
     loader: GLTFLoader,
     source: PersistedModelSource,
@@ -587,22 +606,38 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }
 
     const model = gltf.scene;
+    const editorGlbMetadata = getEditorGlbMetadata(model);
+    const persistedEditorMetadata = persistedState?.metadata;
     let hadInvalidPersistedState = false;
 
     resetViewerStateForModelLoad();
     clearModel(modelRoot);
+    removeEditorGeneratedLoopMeshes(model, Boolean(editorGlbMetadata));
     styleModel(model);
     setTextureAvailable(modelHasSourceTextureMaps(model));
     normalizeModel(model);
 
     if (persistedState) {
+      const metadata = persistedEditorMetadata ?? persistedState;
+
       hadInvalidPersistedState = applyPersistedMeshStates(model, persistedState.meshes);
       hiddenObjectIdsRef.current = new Set(
-        persistedState.hiddenObjectIds.filter((objectId) => Number.isFinite(objectId)),
+        metadata.hiddenObjectIds.filter((objectId) => Number.isFinite(objectId)),
       );
-      objectNamesRef.current = getRestoredObjectNames(persistedState.objectNames);
+      objectNamesRef.current = getRestoredObjectNames(metadata.objectNames);
       nextSeparatedObjectIdRef.current = Math.max(
-        persistedState.nextObjectId,
+        metadata.nextObjectId,
+        getMaxObjectId(model) + 1,
+        1,
+      );
+    } else if (editorGlbMetadata) {
+      hadInvalidPersistedState = applyEditorGlbMeshStates(model, editorGlbMetadata.meshes);
+      hiddenObjectIdsRef.current = new Set(
+        editorGlbMetadata.hiddenObjectIds.filter((objectId) => Number.isFinite(objectId)),
+      );
+      objectNamesRef.current = getRestoredObjectNames(editorGlbMetadata.objectNames);
+      nextSeparatedObjectIdRef.current = Math.max(
+        editorGlbMetadata.nextObjectId,
         getMaxObjectId(model) + 1,
         1,
       );
@@ -621,16 +656,19 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     refreshViewportObjectOutlines(model);
     refreshLooseEdgeOverlays(model, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
 
-    if (persistedState) {
+    const restoredLoopCapStates = persistedState
+      ? (persistedEditorMetadata?.loopCapStates ?? persistedState.loopCapStates)
+      : editorGlbMetadata?.loopCapStates;
+
+    if (restoredLoopCapStates) {
       hadInvalidPersistedState =
-        restoreLooseEdgeLoopCapStates(model, persistedState.loopCapStates) ||
-        hadInvalidPersistedState;
+        restoreLooseEdgeLoopCapStates(model, restoredLoopCapStates) || hadInvalidPersistedState;
     }
 
     setSeparatedObjects(
       collectSeparatedObjects(modelRoot, hiddenObjectIdsRef.current, objectNamesRef.current),
     );
-    frameModel(camera, controls, model);
+    frameModel(cameraRef.current ?? camera, controls, model);
     currentModelSourceRef.current = {
       ...source,
       data: cloneArrayBuffer(source.data),
@@ -647,7 +685,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
   const restorePersistedViewerState = async (
     modelRoot: THREE.Group,
-    camera: THREE.PerspectiveCamera,
+    camera: ViewerCamera,
     controls: OrbitControls,
     loader: GLTFLoader,
     isCancelled: () => boolean,
@@ -733,8 +771,10 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     isEdgeLoopCapToolEnabledRef,
     isSeparationToolEnabledRef,
     looseEdgeLoopCapStatesRef,
+    cameraModeRef,
     persistenceSaveTimeoutRef,
     toastTimeoutRef,
+    toggleCameraModeHandlerRef,
     setLooseEdgeLoopCapTargetHandlerRef,
     schedulePersistViewerStateHandlerRef,
     getLooseEdgeLoopCapStateHandlerRef,
@@ -753,6 +793,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     pushViewerHistorySnapshot,
     removeCapOffsetGizmo,
     rememberTriangleSelection,
+    setCameraMode: setCameraModeState,
     setLoadState,
     setStatusText,
   });
@@ -853,7 +894,9 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     try {
       exportScene = createBlenderExportScene(
         modelRoot,
+        hiddenObjectIdsRef.current,
         objectNamesRef.current,
+        nextSeparatedObjectIdRef.current,
         looseEdgeLoopCapStatesRef.current,
       );
 
@@ -883,6 +926,55 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       }
 
       setExportBusy(false);
+    }
+  };
+
+  const exportThreeMf = async () => {
+    const modelRoot = rootRef.current;
+    const source = currentModelSourceRef.current;
+
+    if (exportThreeMfBusy) {
+      return;
+    }
+
+    if (!modelRoot || !source || loadState !== "ready") {
+      showToast("Load a GLB before exporting.");
+      return;
+    }
+
+    let exportScene: THREE.Scene | null = null;
+    const exportFileName = getThreeMfExportFileName(source.name);
+
+    setExportThreeMfBusy(true);
+    setStatusText(`Exporting ${exportFileName}`);
+
+    try {
+      exportScene = createBlenderExportScene(
+        modelRoot,
+        hiddenObjectIdsRef.current,
+        objectNamesRef.current,
+        nextSeparatedObjectIdRef.current,
+        looseEdgeLoopCapStatesRef.current,
+      );
+
+      const result = createThreeMfPackage(exportScene);
+
+      if (!result) {
+        throw new Error("3MF export scene is empty");
+      }
+
+      downloadArrayBuffer(result, exportFileName, "model/3mf");
+      setStatusText(`Exported ${exportFileName}`);
+    } catch (error) {
+      console.error(`Could not export 3MF "${exportFileName}"`, error);
+      setStatusText("Could not export 3MF");
+      showToast("Could not export 3MF. Check the console for details.");
+    } finally {
+      if (exportScene) {
+        disposeObject(exportScene);
+      }
+
+      setExportThreeMfBusy(false);
     }
   };
 
@@ -916,24 +1008,31 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         canExport={loadState === "ready" && currentModelSourceRef.current !== null}
         canUndo={canUndo && loadState === "ready" && !separationBusy}
         exportBusy={exportBusy}
+        exportThreeMfBusy={exportThreeMfBusy}
         inputRef={inputRef}
         loadState={loadState}
         statusText={statusText}
         onExportGlb={exportBlenderGlb}
+        onExportThreeMf={exportThreeMf}
         onFileChange={handleFileChange}
         onUndo={undoLastViewerAction}
       />
       <ObjectsPanel
         objects={separatedObjects}
         selectedObjectIds={objectListSelectedIds}
-        textureAvailable={textureAvailable}
-        textureVisible={textureVisible}
         onJoinSelectedObjects={joinSelectedObjects}
         onRenameObject={renameSeparatedObject}
         onSelectObject={selectSeparatedObject}
-        onToggleTexture={toggleTextureVisibility}
         onToggleVisibility={toggleObjectVisibility}
       />
+      <CameraModeToggle mode={cameraMode} onToggle={() => toggleCameraModeHandlerRef.current?.()} />
+      {separatedObjects.length > 0 ? (
+        <TextureToggle
+          available={textureAvailable}
+          visible={textureVisible}
+          onToggle={toggleTextureVisibility}
+        />
+      ) : null}
       {isSeparationToolEnabled ? (
         <SeparationToolPanel
           graph={linkedFaceSelectionGraph}

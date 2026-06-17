@@ -3,6 +3,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
+import { ViewportGizmo } from "three-viewport-gizmo";
 
 import {
   targetModelSize,
@@ -39,6 +40,8 @@ import {
 } from "./model-viewer-core";
 
 import type { ModelViewerSceneParams } from "./model-viewer-scene-types";
+import type { ViewerCamera } from "./model-viewer-scene-types";
+import type { CameraMode } from "../viewer-controls/camera-mode-toggle";
 export function useModelViewerScene(params: ModelViewerSceneParams) {
   const {
     mountRef,
@@ -65,8 +68,10 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     isEdgeLoopCapToolEnabledRef,
     isSeparationToolEnabledRef,
     looseEdgeLoopCapStatesRef,
+    cameraModeRef,
     persistenceSaveTimeoutRef,
     toastTimeoutRef,
+    toggleCameraModeHandlerRef,
     setLooseEdgeLoopCapTargetHandlerRef,
     schedulePersistViewerStateHandlerRef,
     getLooseEdgeLoopCapStateHandlerRef,
@@ -85,6 +90,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     pushViewerHistorySnapshot,
     removeCapOffsetGizmo,
     rememberTriangleSelection,
+    setCameraMode,
     setLoadState,
     setStatusText,
   } = params;
@@ -99,9 +105,15 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf2f2f0);
 
-    const camera = new THREE.PerspectiveCamera(45, 1, cameraNearPlane, 1000);
-    camera.position.set(4, 3, 6);
-    cameraRef.current = camera;
+    const perspectiveCamera = new THREE.PerspectiveCamera(45, 1, cameraNearPlane, 1000);
+    const orthographicCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, cameraNearPlane, 1000);
+    let activeCamera: ViewerCamera =
+      cameraModeRef.current === "orthographic" ? orthographicCamera : perspectiveCamera;
+
+    perspectiveCamera.position.set(4, 3, 6);
+    orthographicCamera.position.copy(perspectiveCamera.position);
+    orthographicCamera.quaternion.copy(perspectiveCamera.quaternion);
+    cameraRef.current = activeCamera;
 
     let renderer: THREE.WebGLRenderer;
 
@@ -121,13 +133,15 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     renderer.domElement.style.display = "block";
     mount.appendChild(renderer.domElement);
 
-    const controls = new OrbitControls(camera, renderer.domElement);
+    const controls = new OrbitControls(activeCamera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.enablePan = true;
     controls.screenSpacePanning = true;
     controls.minDistance = minOrbitDistance;
     controls.maxDistance = maxOrbitDistance;
+    controls.minZoom = 0.01;
+    controls.maxZoom = 1000;
     controls.zoomSpeed = 1.2;
     controlsRef.current = controls;
 
@@ -155,7 +169,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     scene.add(capNormalTarget);
     capNormalTargetRef.current = capNormalTarget;
 
-    const capNormalTransformControls = new TransformControls(camera, renderer.domElement);
+    const capNormalTransformControls = new TransformControls(activeCamera, renderer.domElement);
     capNormalTransformControls.setMode("translate");
     capNormalTransformControls.setSpace("world");
     capNormalTransformControls.setSize(0.7);
@@ -189,6 +203,85 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     capNormalTransformControlsRef.current = capNormalTransformControls;
     capNormalTransformHelperRef.current = capNormalTransformHelper;
 
+    const viewportGizmo = new ViewportGizmo(activeCamera, renderer, {
+      animated: true,
+      container: mount,
+      offset: {
+        bottom: 16,
+        left: 16,
+      },
+      placement: "bottom-left",
+      size: 96,
+      type: "cube",
+    });
+
+    viewportGizmo.attachControls(controls);
+
+    const getPerspectiveDistanceForOrthographicZoom = () =>
+      1 /
+      Math.max(
+        orthographicCamera.zoom * Math.tan(THREE.MathUtils.degToRad(perspectiveCamera.fov / 2)),
+        0.0001,
+      );
+
+    const getOrthographicZoomForPerspectiveDistance = () =>
+      1 /
+      Math.max(
+        perspectiveCamera.position.distanceTo(controls.target) *
+          Math.tan(THREE.MathUtils.degToRad(perspectiveCamera.fov / 2)),
+        0.0001,
+      );
+
+    const syncInactiveCameraFromActiveCamera = () => {
+      if (activeCamera === perspectiveCamera) {
+        orthographicCamera.position.copy(perspectiveCamera.position);
+        orthographicCamera.quaternion.copy(perspectiveCamera.quaternion);
+        orthographicCamera.near = perspectiveCamera.near;
+        orthographicCamera.far = perspectiveCamera.far;
+        orthographicCamera.zoom = getOrthographicZoomForPerspectiveDistance();
+        orthographicCamera.updateProjectionMatrix();
+        return;
+      }
+
+      const direction = orthographicCamera.position.clone().sub(controls.target).normalize();
+      const distance = getPerspectiveDistanceForOrthographicZoom();
+
+      if (direction.lengthSq() === 0) {
+        direction.copy(new THREE.Vector3(1, 1, 1).normalize());
+      }
+
+      perspectiveCamera.position.copy(controls.target).addScaledVector(direction, distance);
+      perspectiveCamera.quaternion.copy(orthographicCamera.quaternion);
+      perspectiveCamera.near = orthographicCamera.near;
+      perspectiveCamera.far = orthographicCamera.far;
+      perspectiveCamera.updateProjectionMatrix();
+    };
+
+    const setActiveCamera = (mode: CameraMode) => {
+      const nextCamera = mode === "orthographic" ? orthographicCamera : perspectiveCamera;
+
+      if (nextCamera === activeCamera) {
+        return;
+      }
+
+      syncInactiveCameraFromActiveCamera();
+      activeCamera = nextCamera;
+      cameraModeRef.current = mode;
+      cameraRef.current = activeCamera;
+      controls.object = activeCamera;
+      capNormalTransformControls.camera = activeCamera;
+      viewportGizmo.camera = activeCamera;
+      viewportGizmo.attachControls(controls);
+      activeCamera.updateProjectionMatrix();
+      controls.update();
+      viewportGizmo.update(false);
+      setCameraMode(mode);
+    };
+
+    toggleCameraModeHandlerRef.current = () => {
+      setActiveCamera(cameraModeRef.current === "perspective" ? "orthographic" : "perspective");
+    };
+
     const handleCapNormalTransformDragging = (event: { value: unknown }) => {
       const isDragging = event.value === true;
 
@@ -201,6 +294,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
       }
 
       if (capNormalTransformChangedRef.current) {
+        handleCapNormalTransformChange();
         pushViewerHistorySnapshot(capNormalTransformHistorySnapshotRef.current);
         schedulePersistViewerStateHandlerRef.current?.();
       }
@@ -298,7 +392,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
 
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(pointer, camera);
+      raycaster.setFromCamera(pointer, activeCamera);
 
       return raycaster.intersectObjects(modelRoot.children, true).find((intersection) => {
         if (!isSelectableMesh(intersection.object) || intersection.faceIndex == null) {
@@ -342,12 +436,12 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
 
           const start = getScreenPoint(
             segment.start.clone().applyMatrix4(child.matrixWorld),
-            camera,
+            activeCamera,
             viewport,
           );
           const end = getScreenPoint(
             segment.end.clone().applyMatrix4(child.matrixWorld),
-            camera,
+            activeCamera,
             viewport,
           );
 
@@ -422,12 +516,12 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
 
           const startScreen = getScreenPoint(
             startWorld.copy(start).applyMatrix4(selection.mesh.matrixWorld),
-            camera,
+            activeCamera,
             viewport,
           );
           const endScreen = getScreenPoint(
             endWorld.copy(end).applyMatrix4(selection.mesh.matrixWorld),
-            camera,
+            activeCamera,
             viewport,
           );
 
@@ -565,8 +659,8 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
           : visualLength;
       const hitStartWorld = gizmo.localToWorld(hitStartLocal.clone());
       const hitEndWorld = gizmo.localToWorld(hitEndLocal.clone());
-      const startScreen = getScreenPoint(hitStartWorld, camera, rect);
-      const endScreen = getScreenPoint(hitEndWorld, camera, rect);
+      const startScreen = getScreenPoint(hitStartWorld, activeCamera, rect);
+      const endScreen = getScreenPoint(hitEndWorld, activeCamera, rect);
 
       if (!startScreen || !endScreen) {
         return null;
@@ -878,11 +972,17 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     const handleResize = () => {
       const { clientWidth, clientHeight } = mount;
 
-      camera.aspect = clientWidth / clientHeight;
-      camera.updateProjectionMatrix();
       renderer.setSize(clientWidth, clientHeight);
+      perspectiveCamera.aspect = clientWidth / clientHeight;
+      perspectiveCamera.updateProjectionMatrix();
+      orthographicCamera.left = -clientWidth / clientHeight;
+      orthographicCamera.right = clientWidth / clientHeight;
+      orthographicCamera.top = 1;
+      orthographicCamera.bottom = -1;
+      orthographicCamera.updateProjectionMatrix();
       updateHoverEdgeResolution(modelRoot, clientWidth, clientHeight);
       controls.update();
+      viewportGizmo.update(false);
     };
 
     handleResize();
@@ -892,7 +992,9 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
 
     const render = () => {
       controls.update();
-      renderer.render(scene, camera);
+      syncInactiveCameraFromActiveCamera();
+      renderer.render(scene, activeCamera);
+      viewportGizmo.render();
       animationFrame = window.requestAnimationFrame(render);
     };
 
@@ -902,7 +1004,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
 
     void restorePersistedViewerStateHandlerRef.current?.(
       modelRoot,
-      camera,
+      activeCamera,
       controls,
       loader,
       () => disposed,
@@ -945,6 +1047,8 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
       capNormalTargetRef.current = null;
       capNormalTransformControlsRef.current = null;
       capNormalTransformHelperRef.current = null;
+      toggleCameraModeHandlerRef.current = null;
+      viewportGizmo.dispose();
       clearModel(modelRoot);
       rootRef.current = null;
       cameraRef.current = null;

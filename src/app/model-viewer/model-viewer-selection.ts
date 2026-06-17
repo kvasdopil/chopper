@@ -163,6 +163,35 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     );
   };
 
+  const applyBoundaryCutSelectionVisuals = (selection: LinkedFaceSelectionDetails | null) => {
+    const modelRoot = rootRef.current;
+
+    if (!modelRoot || !selection) {
+      return;
+    }
+
+    clearLinkedFaceSelectionOverlay();
+    clearSelectionBoundaryLoopOverlay();
+
+    if (separateModeActiveRef.current) {
+      const boundaryLoops = buildSelectionBoundaryLoops(selection);
+      const boundaryOverlay = createSelectionBoundaryLoopOverlay(selection, boundaryLoops);
+
+      selectionBoundaryLoopsRef.current = boundaryLoops;
+
+      if (boundaryOverlay) {
+        (selection.mesh.parent ?? modelRoot).add(boundaryOverlay);
+        selectionBoundaryLoopOverlayRef.current = boundaryOverlay;
+      }
+    }
+
+    updateHoverEdgeResolution(
+      modelRoot,
+      mountRef.current?.clientWidth ?? 1,
+      mountRef.current?.clientHeight ?? 1,
+    );
+  };
+
   const clearLinkedFaceSelection = (clearObjectSelection = true, refreshVisuals = true) => {
     const modelRoot = rootRef.current;
     const hadLinkedFaceSelection = linkedFaceSelectionRef.current != null;
@@ -784,6 +813,8 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     try {
       clearSelectedLooseEdgeLoop();
 
+      const seedMesh = selection.mesh;
+      const seedTriangleIndex = selection.seedTriangleIndex;
       const historySnapshot = createCurrentViewerHistorySnapshot();
 
       if (!cutSelectionBoundaryLoopTopology(selection, boundaryLoop)) {
@@ -813,17 +844,6 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
 
       await reportProgress("Refreshing model");
 
-      rememberedTriangleSelectionRef.current = null;
-      linkedFaceSelectionRef.current = null;
-      linkedFaceSelectionCacheRef.current = null;
-      clearLinkedFaceSelectionOverlay();
-      clearSelectionBoundaryLoopOverlay();
-      setLinkedFaceSelectionGraph(null);
-      setLinkedFaceSelection((current) => ({
-        ...current,
-        active: false,
-        count: 0,
-      }));
       refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
       applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
       refreshObjectWireframes(modelRoot, hiddenObjectIdsRef.current, separateModeActiveRef.current);
@@ -831,6 +851,43 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
       syncLooseEdgeLoopCapStates(modelRoot);
       refreshSeparatedObjects();
+
+      const nextSelectionCache = buildLinkedFaceSelectionCache(seedMesh, seedTriangleIndex);
+
+      if (nextSelectionCache) {
+        const nextSelection = createLinkedFaceSelectionFromCache(
+          nextSelectionCache,
+          linkedFaceSelectionThresholdRef.current,
+        );
+
+        rememberTriangleSelection(seedMesh, seedTriangleIndex);
+        linkedFaceSelectionRef.current = nextSelection;
+        linkedFaceSelectionCacheRef.current = nextSelectionCache;
+        setObjectSelectionState(new Set([nextSelection.objectId]), nextSelection.objectId);
+        refreshLooseEdgeLoopCapVisibility(hiddenObjectIdsRef.current);
+        setLinkedFaceSelectionGraph(nextSelectionCache);
+        setLinkedFaceSelection({
+          active: true,
+          count: nextSelection.selectedTriangleIndexes.size,
+          threshold: linkedFaceSelectionThresholdRef.current,
+        });
+        refreshViewportObjectOutlines(modelRoot);
+        applyBoundaryCutSelectionVisuals(nextSelection);
+        refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, nextSelection.objectId);
+      } else {
+        rememberedTriangleSelectionRef.current = null;
+        linkedFaceSelectionRef.current = null;
+        linkedFaceSelectionCacheRef.current = null;
+        clearLinkedFaceSelectionOverlay();
+        clearSelectionBoundaryLoopOverlay();
+        setLinkedFaceSelectionGraph(null);
+        setLinkedFaceSelection((current) => ({
+          ...current,
+          active: false,
+          count: 0,
+        }));
+      }
+
       schedulePersistViewerState();
 
       await reportProgress("Done");

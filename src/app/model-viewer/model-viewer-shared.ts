@@ -101,6 +101,7 @@ export type LooseEdgeLoopCapState = {
   cone: boolean;
   fill: THREE.Mesh | null;
   mode: LooseEdgeLoopMode;
+  normalAxisTarget: THREE.Vector3 | null;
   normalTarget: THREE.Vector3 | null;
   occlusionOverlay: THREE.Mesh | null;
   objectId: number;
@@ -113,6 +114,7 @@ export type LooseEdgeLoopCapAxisData = {
   defaultOffset: number;
 };
 export type ExportGeometryGroup = {
+  isGeneratedLoop?: boolean;
   materialName: string;
   positions: number[];
 };
@@ -469,21 +471,27 @@ export function getSeparatedObjectLabel(objectId: number, objectNames: ObjectNam
 }
 
 export function getTriangleObjectIds(mesh: THREE.Mesh) {
-  const existing = mesh.geometry.userData.triangleObjectIds;
-
-  if (existing instanceof Uint32Array) {
-    return existing;
-  }
-
   const position = mesh.geometry.getAttribute("position");
 
   if (!(position instanceof THREE.BufferAttribute)) {
     return null;
   }
 
-  const objectIds = new Uint32Array(Math.floor(position.count / 3));
+  const triangleCount = Math.floor(position.count / 3);
+  const existing = mesh.geometry.userData.triangleObjectIds;
+
+  if (existing instanceof Uint32Array && existing.length === triangleCount) {
+    return existing;
+  }
+
+  const objectIds = new Uint32Array(triangleCount);
+
+  if (existing instanceof Uint32Array) {
+    objectIds.set(existing.subarray(0, Math.min(existing.length, triangleCount)));
+  }
 
   mesh.geometry.userData.triangleObjectIds = objectIds;
+  delete mesh.geometry.userData.triangleObjectIdSet;
 
   return objectIds;
 }

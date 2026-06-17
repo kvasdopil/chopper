@@ -24,19 +24,24 @@ export function refreshObjectBoundaryAttributes(mesh: THREE.Mesh) {
     return;
   }
 
+  const triangleVertexCount = objectIds.length * 3;
   const valueCount = position.count * 3;
   const existingBarycentric = mesh.geometry.getAttribute("objectBoundaryBarycentric");
   const existingEdges = mesh.geometry.getAttribute("objectBoundaryEdges");
-  const barycentricValues =
+  const canReuseBarycentric =
     existingBarycentric instanceof THREE.BufferAttribute &&
     existingBarycentric.array instanceof Float32Array &&
-    existingBarycentric.array.length === valueCount
+    existingBarycentric.array.length === valueCount;
+  const canReuseEdges =
+    existingEdges instanceof THREE.BufferAttribute &&
+    existingEdges.array instanceof Float32Array &&
+    existingEdges.array.length === valueCount;
+  const barycentricValues =
+    canReuseBarycentric && existingBarycentric instanceof THREE.BufferAttribute
       ? existingBarycentric.array
       : new Float32Array(valueCount);
   const edgeValues =
-    existingEdges instanceof THREE.BufferAttribute &&
-    existingEdges.array instanceof Float32Array &&
-    existingEdges.array.length === valueCount
+    canReuseEdges && existingEdges instanceof THREE.BufferAttribute
       ? existingEdges.array
       : new Float32Array(valueCount);
   const edgeRecords = new Map<
@@ -50,7 +55,7 @@ export function refreshObjectBoundaryAttributes(mesh: THREE.Mesh) {
 
   edgeValues.fill(0);
 
-  for (let index = 0; index < position.count; index += 3) {
+  for (let index = 0; index < triangleVertexCount; index += 3) {
     const triangleIndex = index / 3;
     const objectId = objectIds[triangleIndex] ?? defaultObjectId;
     const vertexKeys = [
@@ -95,7 +100,7 @@ export function refreshObjectBoundaryAttributes(mesh: THREE.Mesh) {
     });
   });
 
-  if (existingBarycentric instanceof THREE.BufferAttribute) {
+  if (canReuseBarycentric && existingBarycentric instanceof THREE.BufferAttribute) {
     existingBarycentric.needsUpdate = true;
   } else {
     mesh.geometry.setAttribute(
@@ -104,7 +109,7 @@ export function refreshObjectBoundaryAttributes(mesh: THREE.Mesh) {
     );
   }
 
-  if (existingEdges instanceof THREE.BufferAttribute) {
+  if (canReuseEdges && existingEdges instanceof THREE.BufferAttribute) {
     existingEdges.needsUpdate = true;
   } else {
     mesh.geometry.setAttribute("objectBoundaryEdges", new THREE.BufferAttribute(edgeValues, 3));
