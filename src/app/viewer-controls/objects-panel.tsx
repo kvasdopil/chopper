@@ -14,7 +14,7 @@ import type { SeparatedObjectSummary } from "./types";
 type ObjectsPanelProps = {
   autoNaming: boolean;
   objects: SeparatedObjectSummary[];
-  onAutoNameObjects: () => void;
+  onAutoNameObjects: (showDebugView?: boolean) => void;
   onJoinSelectedObjects: () => void;
   onRenameObject: (objectId: number, name: string) => void;
   onSelectObject: (objectId: number, additive?: boolean) => void;
@@ -103,7 +103,7 @@ export function ObjectsPanel({
             title="Auto name objects"
             onClick={(event) => {
               event.stopPropagation();
-              onAutoNameObjects();
+              onAutoNameObjects(event.shiftKey || event.ctrlKey || event.metaKey);
             }}
           >
             {autoNaming ? (

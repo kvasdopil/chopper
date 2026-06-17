@@ -18,9 +18,8 @@ type GeminiResponse = {
 };
 
 type AutoNamedObject = {
+  marker: string;
   name: string;
-  x: number;
-  y: number;
 };
 
 const objectSchema = {
@@ -35,16 +34,12 @@ const objectSchema = {
             type: "STRING",
             description: "Short camelCase name for the visible object part.",
           },
-          x: {
-            type: "NUMBER",
-            description: "Horizontal pixel coordinate from the left edge of the image.",
-          },
-          y: {
-            type: "NUMBER",
-            description: "Vertical pixel coordinate from the top edge of the image.",
+          marker: {
+            type: "STRING",
+            description: "The circular marker letter shown on this object in the image.",
           },
         },
-        required: ["name", "x", "y"],
+        required: ["marker", "name"],
       },
     },
   },
@@ -65,11 +60,10 @@ function getPrompt(imageWidth: number, imageHeight: number) {
   return [
     `This is a ${imageWidth}x${imageHeight} pixel PNG from the current camera view of a 3D model I created and separated into parts.`,
     "The view is orthographic, not perspective.",
-    `A semitransparent 4x4 grid is overlaid on the image; grid lines are at x=${imageWidth / 4}, ${imageWidth / 2}, ${(imageWidth * 3) / 4} and y=${imageHeight / 4}, ${imageHeight / 2}, ${(imageHeight * 3) / 4}.`,
-    "The separated objects are indicated by color: each distinct visible color region is a separate object.",
-    "For each distinct visible object color, provide one short camelCase object name and one coordinate near the visible center of that color region.",
+    "Each separated model part has a circular letter marker whose fill color matches that part, such as A, B, C, or D.",
+    "For every visible letter marker, provide the marker letter and one short camelCase object name for the model part under that marker.",
     "For left/right paired parts, use an L or R suffix notation such as eyeL, eyeR, shoeL, or shoeR; do not use leftEye, rightEye, leftShoe, or rightShoe.",
-    `Use pixel coordinates in the image: top-left is (0, 0), x increases to the right, y increases downward, and bottom-right is (${imageWidth}, ${imageHeight}).`,
+    "Return exactly one entry per visible marker. Do not return pixel coordinates.",
   ].join(" ");
 }
 
@@ -85,15 +79,11 @@ function normalizeObjects(value: unknown): AutoNamedObject[] {
       const candidate = object as Partial<AutoNamedObject>;
 
       return {
+        marker: typeof candidate.marker === "string" ? candidate.marker.trim().toUpperCase() : "",
         name: typeof candidate.name === "string" ? candidate.name : "",
-        x: typeof candidate.x === "number" ? candidate.x : Number.NaN,
-        y: typeof candidate.y === "number" ? candidate.y : Number.NaN,
       };
     })
-    .filter(
-      (object) =>
-        object.name.trim().length > 0 && Number.isFinite(object.x) && Number.isFinite(object.y),
-    );
+    .filter((object) => object.marker.length > 0 && object.name.trim().length > 0);
 }
 
 function parseGeminiObjects(text: string) {

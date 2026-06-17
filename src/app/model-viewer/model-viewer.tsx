@@ -73,6 +73,7 @@ import {
 import {
   createObjectNamingCapture,
   getUniqueAutoObjectName,
+  isAutoNameEligibleObjectLabel,
   type AutoNamedImageObject,
 } from "./auto-object-naming";
 import { createThreeMfPackage } from "./three-mf";
@@ -99,7 +100,7 @@ type ModelViewerProps = {
 type AutoNameDebugState = {
   imageSize: number;
   imageUrl: string;
-  markers: AutoNamedImageObject[];
+  markers: Array<AutoNamedImageObject & { x: number; y: number }>;
 };
 
 export function ModelViewer({ tools }: ModelViewerProps) {
@@ -250,7 +251,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
   const showAutoNameDebugView = (
     blob: Blob,
-    markers: AutoNamedImageObject[],
+    markers: Array<AutoNamedImageObject & { x: number; y: number }>,
     imageSize: number,
   ) => {
     const imageUrl = URL.createObjectURL(blob);
@@ -1040,7 +1041,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
           modelRoot,
           hiddenObjectIdsRef.current,
           objectNamesRef.current,
-        ).filter((object) => object.visible && !objectNamesRef.current[object.id]?.trim())
+        ).filter((object) => object.visible && isAutoNameEligibleObjectLabel(object.label))
       : [];
   };
 
@@ -1066,11 +1067,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     const renamedObjectIds = new Set<number>();
 
     objects.forEach((object) => {
-      if (
-        renamedObjectIds.has(object.objectId) ||
-        !eligibleObjectIds.has(object.objectId) ||
-        objectNamesRef.current[object.objectId]?.trim()
-      ) {
+      if (renamedObjectIds.has(object.objectId) || !eligibleObjectIds.has(object.objectId)) {
         return;
       }
 
@@ -1107,11 +1104,13 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }
   };
 
-  const autoNameObjects = async () => {
+  const autoNameObjects = async (showDebugView = false) => {
     if (autoNameBusy) {
       autoNameAbortControllerRef.current?.abort();
       return;
     }
+
+    clearAutoNameDebugView();
 
     const modelRoot = rootRef.current;
     const sourceCamera = cameraRef.current;
@@ -1170,14 +1169,25 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
       const payload = (await response.json()) as { objects?: AutoNamedImageObject[] };
       const detectedObjects = payload.objects ?? [];
+      const debugMarkers = detectedObjects
+        .map((object) => {
+          const marker = capture?.getMarker(object.marker) ?? null;
 
-      showAutoNameDebugView(capture.blob, detectedObjects, capture.size);
+          return marker ? { ...object, x: marker.x, y: marker.y } : null;
+        })
+        .filter(
+          (marker): marker is AutoNamedImageObject & { x: number; y: number } => marker !== null,
+        );
+
+      if (showDebugView) {
+        showAutoNameDebugView(capture.blob, debugMarkers, capture.size);
+      }
 
       const mappedObjects = detectedObjects
         .map((object) => {
-          const objectId = capture?.getObjectIdAtImageCoordinate(object.x, object.y) ?? null;
+          const marker = capture?.getMarker(object.marker) ?? null;
 
-          return objectId == null ? null : { ...object, objectId };
+          return marker ? { ...object, objectId: marker.objectId } : null;
         })
         .filter((object): object is AutoNamedImageObject & { objectId: number } => object !== null);
       const renamedCount = applyAutoObjectNames(mappedObjects);

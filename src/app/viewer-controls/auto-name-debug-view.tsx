@@ -2,6 +2,7 @@ import Image from "next/image";
 import { LuX } from "react-icons/lu";
 
 type AutoNameDebugMarker = {
+  marker: string;
   name: string;
   x: number;
   y: number;
@@ -67,11 +68,10 @@ export function AutoNameDebugView({
               className="pointer-events-none absolute"
               style={getMarkerPosition(marker, imageSize)}
             >
-              <span className="absolute left-0 top-0 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white bg-red-500 shadow" />
               <span
                 className={`absolute top-0 max-w-36 -translate-y-1/2 truncate rounded-sm bg-neutral-950/85 px-1.5 py-0.5 text-xs font-medium text-white shadow ${getMarkerLabelPosition(marker, imageSize)}`}
               >
-                {marker.name}
+                {marker.marker}: {marker.name}
               </span>
             </div>
           ))}
