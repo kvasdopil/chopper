@@ -1,11 +1,20 @@
 import { useState } from "react";
 import type { KeyboardEvent } from "react";
-import { LuEye, LuEyeOff, LuMerge } from "react-icons/lu";
+import {
+  LuCircleStop,
+  LuEye,
+  LuEyeOff,
+  LuLoaderCircle,
+  LuMerge,
+  LuWandSparkles,
+} from "react-icons/lu";
 
 import type { SeparatedObjectSummary } from "./types";
 
 type ObjectsPanelProps = {
+  autoNaming: boolean;
   objects: SeparatedObjectSummary[];
+  onAutoNameObjects: () => void;
   onJoinSelectedObjects: () => void;
   onRenameObject: (objectId: number, name: string) => void;
   onSelectObject: (objectId: number, additive?: boolean) => void;
@@ -14,7 +23,9 @@ type ObjectsPanelProps = {
 };
 
 export function ObjectsPanel({
+  autoNaming,
   objects,
+  onAutoNameObjects,
   onJoinSelectedObjects,
   onRenameObject,
   onSelectObject,
@@ -81,7 +92,29 @@ export function ObjectsPanel({
               Join
             </button>
           ) : null}
-          <span className="text-xs text-neutral-500 tabular-nums">{objects.length}</span>
+          <button
+            type="button"
+            className={`group inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-base transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950 ${
+              autoNaming
+                ? "text-neutral-900 hover:bg-red-500/10 hover:text-red-700"
+                : "text-neutral-500 hover:bg-neutral-950/10 hover:text-neutral-900"
+            }`}
+            aria-label={autoNaming ? "Cancel auto name objects" : "Auto name objects"}
+            title="Auto name objects"
+            onClick={(event) => {
+              event.stopPropagation();
+              onAutoNameObjects();
+            }}
+          >
+            {autoNaming ? (
+              <>
+                <LuLoaderCircle aria-hidden="true" className="animate-spin group-hover:hidden" />
+                <LuCircleStop aria-hidden="true" className="hidden group-hover:block" />
+              </>
+            ) : (
+              <LuWandSparkles aria-hidden="true" />
+            )}
+          </button>
         </div>
       </div>
       <div className="max-h-56 space-y-1 overflow-auto pr-1">

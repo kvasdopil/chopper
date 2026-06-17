@@ -18,6 +18,20 @@ Related documents:
 - Object names may be edited inline from the object list.
 - Object names participate in refresh restore, undo, and export.
 
+## Automatic Naming
+
+- The object list exposes an auto-name action for local development builds.
+- Auto naming captures a clean square PNG of the visible model in normal mode without UI selection, split-mode overlays, or viewport controls.
+- The capture uses the current camera view rendered through an orthographic projection and fitted to the visible model bounds with minimal empty margin.
+- The capture includes a 30% opacity 4x4 grid overlay so image-analysis responses can estimate pixel coordinates more reliably.
+- The backend image analysis endpoint returns structured object name candidates and image-space coordinates.
+- Returned coordinates use image pixels with top-left `(0, 0)`, `x` increasing rightward, and `y` increasing downward.
+- The viewer maps returned coordinates back to visible object ids from the same capture camera before applying names.
+- Auto naming only updates generated/default labels such as `Default` or `Object X`; user-edited names are preserved.
+- Auto-applied names are camelCase, unique within the current object name map, undoable, and persisted through the same object-name state as inline edits.
+- While auto naming is in progress, the object-list action shows progress and can be cancelled.
+- After a successful image-analysis response, a dismissible debug view appears above the app with the submitted PNG and every returned object coordinate rendered as a labeled marker.
+
 ## Selection
 
 - Clicking an object row selects that object and highlights the row.

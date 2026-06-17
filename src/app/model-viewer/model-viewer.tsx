@@ -70,10 +70,16 @@ import {
   getEditorGlbMetadata,
   removeEditorGeneratedLoopMeshes,
 } from "./editor-metadata";
+import {
+  createObjectNamingCapture,
+  getUniqueAutoObjectName,
+  type AutoNamedImageObject,
+} from "./auto-object-naming";
 import { createThreeMfPackage } from "./three-mf";
 import { EdgeLoopCapToolPanel } from "./tools/edge-loop-cap-tool";
 import { SeparationToolPanel } from "./tools/separation-tool";
 import type { ViewerTool, ViewerToolId } from "./tools";
+import { AutoNameDebugView } from "../viewer-controls/auto-name-debug-view";
 import { ObjectsPanel } from "../viewer-controls/objects-panel";
 import { TopBar } from "../viewer-controls/top-bar";
 import { CameraModeToggle, type CameraMode } from "../viewer-controls/camera-mode-toggle";
@@ -88,6 +94,12 @@ import type {
 
 type ModelViewerProps = {
   tools: ViewerTool[];
+};
+
+type AutoNameDebugState = {
+  imageSize: number;
+  imageUrl: string;
+  markers: AutoNamedImageObject[];
 };
 
 export function ModelViewer({ tools }: ModelViewerProps) {
@@ -117,6 +129,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const selectedLooseEdgeLoopRef = useRef<HoveredEdge | null>(null);
   const selectedLooseEdgeLoopOverlayRef = useRef<LineSegments2 | null>(null);
   const currentModelSourceRef = useRef<PersistedModelSource | null>(null);
+  const autoNameAbortControllerRef = useRef<AbortController | null>(null);
+  const autoNameDebugImageUrlRef = useRef<string | null>(null);
   const persistenceSaveTimeoutRef = useRef<number | null>(null);
   const persistenceSaveFailedRef = useRef(false);
   const isRestoringPersistedStateRef = useRef(false);
@@ -178,6 +192,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const cameraModeRef = useRef<CameraMode>("perspective");
   const toggleCameraModeHandlerRef = useRef<(() => void) | null>(null);
   const [cameraMode, setCameraMode] = useState<CameraMode>("perspective");
+  const [autoNameBusy, setAutoNameBusy] = useState(false);
+  const [autoNameDebug, setAutoNameDebug] = useState<AutoNameDebugState | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
   const [exportThreeMfBusy, setExportThreeMfBusy] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
@@ -222,6 +238,40 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       toastTimeoutRef.current = null;
     }, toastDurationMs);
   };
+
+  const clearAutoNameDebugView = () => {
+    if (autoNameDebugImageUrlRef.current) {
+      URL.revokeObjectURL(autoNameDebugImageUrlRef.current);
+    }
+
+    autoNameDebugImageUrlRef.current = null;
+    setAutoNameDebug(null);
+  };
+
+  const showAutoNameDebugView = (
+    blob: Blob,
+    markers: AutoNamedImageObject[],
+    imageSize: number,
+  ) => {
+    const imageUrl = URL.createObjectURL(blob);
+
+    if (autoNameDebugImageUrlRef.current) {
+      URL.revokeObjectURL(autoNameDebugImageUrlRef.current);
+    }
+
+    autoNameDebugImageUrlRef.current = imageUrl;
+    setAutoNameDebug({ imageSize, imageUrl, markers });
+  };
+
+  useEffect(() => {
+    return () => {
+      autoNameAbortControllerRef.current?.abort();
+
+      if (autoNameDebugImageUrlRef.current) {
+        URL.revokeObjectURL(autoNameDebugImageUrlRef.current);
+      }
+    };
+  }, []);
 
   const setObjectSelectionState = (objectIds: Set<number>, primaryObjectId: number | null) => {
     const nextObjectIds = new Set(objectIds);
@@ -472,6 +522,10 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   });
 
   const resetViewerStateForModelLoad = () => {
+    autoNameAbortControllerRef.current?.abort();
+    autoNameAbortControllerRef.current = null;
+    setAutoNameBusy(false);
+    clearAutoNameDebugView();
     clearScheduledPersistenceSave();
     clearViewerHistory();
     currentModelSourceRef.current = null;
@@ -978,6 +1032,187 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }
   };
 
+  const getAutoNameEligibleObjects = () => {
+    const modelRoot = rootRef.current;
+
+    return modelRoot
+      ? collectSeparatedObjects(
+          modelRoot,
+          hiddenObjectIdsRef.current,
+          objectNamesRef.current,
+        ).filter((object) => object.visible && !objectNamesRef.current[object.id]?.trim())
+      : [];
+  };
+
+  const applyAutoObjectNames = (objects: Array<AutoNamedImageObject & { objectId: number }>) => {
+    const modelRoot = rootRef.current;
+
+    if (!modelRoot) {
+      return 0;
+    }
+
+    const eligibleObjectIds = new Set(getAutoNameEligibleObjects().map((object) => object.id));
+
+    if (eligibleObjectIds.size === 0) {
+      return 0;
+    }
+
+    const nextObjectNames = { ...objectNamesRef.current };
+    const usedNames = new Set(
+      Object.values(nextObjectNames)
+        .map((name) => name.trim())
+        .filter(Boolean),
+    );
+    const renamedObjectIds = new Set<number>();
+
+    objects.forEach((object) => {
+      if (
+        renamedObjectIds.has(object.objectId) ||
+        !eligibleObjectIds.has(object.objectId) ||
+        objectNamesRef.current[object.objectId]?.trim()
+      ) {
+        return;
+      }
+
+      const name = getUniqueAutoObjectName(object.name, usedNames);
+
+      nextObjectNames[object.objectId] = name;
+      usedNames.add(name);
+      renamedObjectIds.add(object.objectId);
+    });
+
+    if (renamedObjectIds.size === 0) {
+      return 0;
+    }
+
+    pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+    objectNamesRef.current = nextObjectNames;
+    setSeparatedObjects(
+      collectSeparatedObjects(modelRoot, hiddenObjectIdsRef.current, objectNamesRef.current),
+    );
+    schedulePersistViewerState();
+
+    return renamedObjectIds.size;
+  };
+
+  const readAnalyzeImageError = async (response: Response) => {
+    try {
+      const payload = (await response.json()) as { error?: unknown };
+
+      return typeof payload.error === "string" && payload.error.trim().length > 0
+        ? payload.error
+        : response.statusText;
+    } catch {
+      return response.statusText;
+    }
+  };
+
+  const autoNameObjects = async () => {
+    if (autoNameBusy) {
+      autoNameAbortControllerRef.current?.abort();
+      return;
+    }
+
+    const modelRoot = rootRef.current;
+    const sourceCamera = cameraRef.current;
+
+    if (!modelRoot || !sourceCamera || loadState !== "ready") {
+      showToast("Load a GLB before auto naming objects.");
+      return;
+    }
+
+    const eligibleObjects = getAutoNameEligibleObjects();
+
+    if (eligibleObjects.length === 0) {
+      showToast("No default object names to update.");
+      return;
+    }
+
+    const abortController = new AbortController();
+    let capture: Awaited<ReturnType<typeof createObjectNamingCapture>> = null;
+
+    autoNameAbortControllerRef.current = abortController;
+    setAutoNameBusy(true);
+    setStatusText("Auto naming objects");
+
+    try {
+      capture = await createObjectNamingCapture(
+        modelRoot,
+        hiddenObjectIdsRef.current,
+        looseEdgeLoopCapStatesRef.current,
+        sourceCamera,
+      );
+
+      if (abortController.signal.aborted) {
+        return;
+      }
+
+      if (!capture) {
+        showToast("No visible objects to auto name.");
+        return;
+      }
+
+      const formData = new FormData();
+
+      formData.append("image", capture.blob, "object-naming.png");
+      formData.append("imageWidth", String(capture.size));
+      formData.append("imageHeight", String(capture.size));
+
+      const response = await fetch("/image/analyze", {
+        body: formData,
+        method: "POST",
+        signal: abortController.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(await readAnalyzeImageError(response));
+      }
+
+      const payload = (await response.json()) as { objects?: AutoNamedImageObject[] };
+      const detectedObjects = payload.objects ?? [];
+
+      showAutoNameDebugView(capture.blob, detectedObjects, capture.size);
+
+      const mappedObjects = detectedObjects
+        .map((object) => {
+          const objectId = capture?.getObjectIdAtImageCoordinate(object.x, object.y) ?? null;
+
+          return objectId == null ? null : { ...object, objectId };
+        })
+        .filter((object): object is AutoNamedImageObject & { objectId: number } => object !== null);
+      const renamedCount = applyAutoObjectNames(mappedObjects);
+
+      if (renamedCount === 0) {
+        showToast("Could not match any default-named objects.");
+        setStatusText(currentModelSourceRef.current?.name ?? statusText);
+        return;
+      }
+
+      setStatusText(`Auto named ${renamedCount} object${renamedCount === 1 ? "" : "s"}`);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setStatusText(currentModelSourceRef.current?.name ?? statusText);
+        return;
+      }
+
+      console.error("Could not auto name objects", error);
+      setStatusText("Could not auto name objects");
+      showToast(
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : "Could not auto name objects.",
+      );
+    } finally {
+      capture?.dispose();
+
+      if (autoNameAbortControllerRef.current === abortController) {
+        autoNameAbortControllerRef.current = null;
+      }
+
+      setAutoNameBusy(false);
+    }
+  };
+
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.currentTarget.value = "";
@@ -1018,8 +1253,10 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         onUndo={undoLastViewerAction}
       />
       <ObjectsPanel
+        autoNaming={autoNameBusy}
         objects={separatedObjects}
         selectedObjectIds={objectListSelectedIds}
+        onAutoNameObjects={autoNameObjects}
         onJoinSelectedObjects={joinSelectedObjects}
         onRenameObject={renameSeparatedObject}
         onSelectObject={selectSeparatedObject}
@@ -1057,6 +1294,14 @@ export function ModelViewer({ tools }: ModelViewerProps) {
           mode={looseEdgeLoopMode}
           onConeChange={handleLooseEdgeLoopConeChange}
           onModeChange={handleLooseEdgeLoopModeChange}
+        />
+      ) : null}
+      {autoNameDebug ? (
+        <AutoNameDebugView
+          imageSize={autoNameDebug.imageSize}
+          imageUrl={autoNameDebug.imageUrl}
+          markers={autoNameDebug.markers}
+          onDismiss={clearAutoNameDebugView}
         />
       ) : null}
       {toast ? (
