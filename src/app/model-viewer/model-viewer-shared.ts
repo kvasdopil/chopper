@@ -33,6 +33,8 @@ export const selectedObjectStencilRenderOrder = 3.9;
 export const selectedObjectOutlineRenderOrder = 4;
 export const looseEdgeColor = 0xef4444;
 export const cappedLooseEdgeColor = 0x22c55e;
+export const unclosedLooseEdgeColor = 0xd946ef;
+export const cappedUnclosedLooseEdgeColor = 0x15803d;
 export const looseEdgeHoverColor = 0xfacc15;
 export const looseEdgeLineWidth = 3;
 export const looseEdgeUiOverlayLineWidth = 4;
@@ -99,6 +101,7 @@ export type LooseEdgeLoop = {
 export type LooseEdgeLoopCapState = {
   cone: boolean;
   fill: THREE.Mesh | null;
+  groupLoopKeys?: string[];
   mode: LooseEdgeLoopMode;
   normalAxisTarget: THREE.Vector3 | null;
   normalTarget: THREE.Vector3 | null;

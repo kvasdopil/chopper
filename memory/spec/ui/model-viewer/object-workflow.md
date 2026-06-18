@@ -43,7 +43,7 @@ Related documents:
 - Clicking the background clears object selection.
 - Mesh/object selection and edge-loop selection are mutually exclusive.
 - Selecting a mesh/object clears edge-loop selection.
-- Selecting an edge loop clears active mesh/object selection but highlights the loop's parent object row as contextual focus.
+- Selecting one or more edge loops clears active mesh/object selection but highlights each selected loop's parent object row as contextual focus.
 
 ## Joining Objects
 
@@ -67,4 +67,4 @@ Related documents:
 
 - Visible non-focused objects render a light gray outline.
 - Selected objects render a yellow outline.
-- The parent object of a selected edge loop is treated as focused, so it does not also receive the non-focused outline.
+- The parent object of each selected edge loop is treated as focused, so it does not also receive the non-focused outline.

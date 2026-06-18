@@ -21,6 +21,7 @@ export type EditorGlbMeshState = {
 
 export type EditorGlbLoopCapState = {
   cone?: boolean;
+  groupSegmentKeys?: string[][];
   meshIndex: number;
   mode: LooseEdgeLoopMode;
   normalAxisTarget?: [number, number, number] | null;
@@ -65,6 +66,10 @@ function isNumberArray(value: unknown): value is number[] {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isStringArrayArray(value: unknown): value is string[][] {
+  return Array.isArray(value) && value.every((item) => isStringArray(item));
 }
 
 function isNormalTarget(value: unknown): value is [number, number, number] | null {
@@ -123,6 +128,9 @@ function getEditorGlbLoopCapState(value: unknown): EditorGlbLoopCapState | null 
     objectId: value.objectId,
     offset: value.offset,
     segmentKeys: value.segmentKeys,
+    groupSegmentKeys: isStringArrayArray(value.groupSegmentKeys)
+      ? value.groupSegmentKeys
+      : undefined,
   };
 }
 

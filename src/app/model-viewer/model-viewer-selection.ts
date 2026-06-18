@@ -21,6 +21,7 @@ import {
   getTriangleObjectId,
   getTriangleObjectIds,
   isSelectableMesh,
+  refreshLooseEdgeOverlay,
   refreshLooseEdgeOverlays,
   refreshObjectMaterialGroups,
   separateLooseObjectPartsAsync,
@@ -46,7 +47,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     selectionBoundaryLoopOverlayRef,
     linkedFaceSelectionThresholdRef,
     rememberedTriangleSelectionRef,
-    selectedLooseEdgeLoopRef,
+    selectedLooseEdgeLoopsRef,
     hiddenObjectIdsRef,
     textureVisibleRef,
     objectNamesRef,
@@ -702,7 +703,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     const modelRoot = rootRef.current;
     const selection = linkedFaceSelectionRef.current;
     const currentSelectedObjectId = selectedObjectIdRef.current;
-    const selectedLooseEdgeLoop = selectedLooseEdgeLoopRef.current;
+    const selectedLooseEdgeLoops = selectedLooseEdgeLoopsRef.current;
     const previousHiddenObjectIds = hiddenObjectIdsRef.current;
     const visibilityChanged =
       nextHiddenObjectIds.size !== previousHiddenObjectIds.size ||
@@ -727,7 +728,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       rememberedTriangleSelectionRef.current = null;
     }
 
-    if (selectedLooseEdgeLoop && nextHiddenObjectIds.has(selectedLooseEdgeLoop.objectId)) {
+    if (selectedLooseEdgeLoops.some((loop) => nextHiddenObjectIds.has(loop.objectId))) {
       clearSelectedLooseEdgeLoop();
     }
 
@@ -1007,7 +1008,11 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       refreshObjectMaterials(modelRoot);
       applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
       refreshViewportObjectOutlines(modelRoot);
-      refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
+      refreshLooseEdgeOverlay(
+        selection.mesh,
+        hiddenObjectIdsRef.current,
+        selectedObjectIdRef.current,
+      );
       syncLooseEdgeLoopCapStates(modelRoot);
       refreshSeparatedObjects();
       schedulePersistViewerState();
@@ -1101,7 +1106,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
         applyLinkedFaceSelectionColors(nextSelection, nextSelectionCache);
         refreshViewportObjectOutlines(modelRoot);
         applyBoundaryCutSelectionVisuals(nextSelection);
-        refreshLooseEdgeOverlays(modelRoot, hiddenObjectIdsRef.current, nextSelection.objectId);
+        refreshLooseEdgeOverlay(seedMesh, hiddenObjectIdsRef.current, nextSelection.objectId);
         syncLooseEdgeLoopCapStates(modelRoot);
       } else {
         rememberedTriangleSelectionRef.current = null;
@@ -1116,11 +1121,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
           count: 0,
         }));
         refreshViewportObjectOutlines(modelRoot);
-        refreshLooseEdgeOverlays(
-          modelRoot,
-          hiddenObjectIdsRef.current,
-          selectedObjectIdRef.current,
-        );
+        refreshLooseEdgeOverlay(seedMesh, hiddenObjectIdsRef.current, selectedObjectIdRef.current);
         syncLooseEdgeLoopCapStates(modelRoot);
       }
 

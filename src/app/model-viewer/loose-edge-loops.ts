@@ -2,8 +2,10 @@ import * as THREE from "three";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 
 import {
+  cappedUnclosedLooseEdgeColor,
   cappedLooseEdgeColor,
   looseEdgeColor,
+  unclosedLooseEdgeColor,
   isSelectableMesh,
   type HoveredEdge,
   type LooseEdgeLoop,
@@ -322,13 +324,16 @@ export function getLooseEdgeLoopDisplayColor(
   modelRoot?: THREE.Object3D | null,
   cappedPositionEdgeKeys?: Set<string>,
 ) {
+  const uncappedColor = loop.isClosed ? looseEdgeColor : unclosedLooseEdgeColor;
+  const cappedColor = loop.isClosed ? cappedLooseEdgeColor : cappedUnclosedLooseEdgeColor;
+
   if (loopCapStates.has(getLooseEdgeLoopCacheKey(mesh, loop))) {
-    return cappedLooseEdgeColor;
+    return cappedColor;
   }
 
   return hasCappedLooseEdgePosition(loop, loopCapStates, modelRoot, cappedPositionEdgeKeys)
-    ? cappedLooseEdgeColor
-    : looseEdgeColor;
+    ? cappedColor
+    : uncappedColor;
 }
 
 export function createLooseEdgeFromLoop(mesh: THREE.Mesh, loop: LooseEdgeLoop): HoveredEdge | null {

@@ -191,19 +191,36 @@ export function appendForceClosingSegments(
   return forceClosed;
 }
 
-export function getLooseEdgeLoopFillData(edge: HoveredEdge): LooseEdgeLoopFillData | null {
-  const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
-  const segmentsByKey = edge.mesh.userData.looseEdgeSegmentsByKey as
-    | Map<string, LooseEdgeSegment>
-    | undefined;
+export function getLooseEdgeLoopsFillData(edges: HoveredEdge[]): LooseEdgeLoopFillData | null {
+  const firstEdge = edges[0];
+  const loops: Array<{
+    edge: HoveredEdge;
+    loop: NonNullable<ReturnType<typeof getLooseEdgeLoop>>;
+  }> = [];
 
-  if (!loop || loop.positions.length === 0) {
+  edges
+    .filter((edge) => edge.mesh === firstEdge?.mesh)
+    .forEach((edge) => {
+      const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
+
+      if (!loop || loop.positions.length === 0) {
+        return;
+      }
+
+      loops.push({ edge, loop });
+    });
+
+  if (!firstEdge || loops.length === 0) {
     return null;
   }
 
+  const segmentsByKey = firstEdge.mesh.userData.looseEdgeSegmentsByKey as
+    | Map<string, LooseEdgeSegment>
+    | undefined;
   const pointIndexByKey = new Map<string, number>();
   const points: THREE.Vector3[] = [];
   const segments: LooseEdgeLoopFillSegment[] = [];
+  const loopSegmentKeys: string[] = [];
 
   const getPointIndex = (point: THREE.Vector3) => {
     const key = getLoopFillPointKey(point);
@@ -221,31 +238,35 @@ export function getLooseEdgeLoopFillData(edge: HoveredEdge): LooseEdgeLoopFillDa
     return pointIndex;
   };
 
-  for (let index = 0; index < loop.positions.length; index += 6) {
-    const start = new THREE.Vector3(
-      loop.positions[index],
-      loop.positions[index + 1],
-      loop.positions[index + 2],
-    );
-    const end = new THREE.Vector3(
-      loop.positions[index + 3],
-      loop.positions[index + 4],
-      loop.positions[index + 5],
-    );
+  loops.forEach(({ loop }) => {
+    loopSegmentKeys.push(...loop.segmentKeys);
 
-    if (start.distanceToSquared(end) === 0) {
-      continue;
+    for (let index = 0; index < loop.positions.length; index += 6) {
+      const start = new THREE.Vector3(
+        loop.positions[index],
+        loop.positions[index + 1],
+        loop.positions[index + 2],
+      );
+      const end = new THREE.Vector3(
+        loop.positions[index + 3],
+        loop.positions[index + 4],
+        loop.positions[index + 5],
+      );
+
+      if (start.distanceToSquared(end) === 0) {
+        continue;
+      }
+
+      segments.push({
+        end,
+        endIndex: getPointIndex(end),
+        start,
+        startIndex: getPointIndex(start),
+      });
     }
+  });
 
-    segments.push({
-      end,
-      endIndex: getPointIndex(end),
-      start,
-      startIndex: getPointIndex(start),
-    });
-  }
-
-  const forceClosed = loop.isClosed ? false : appendForceClosingSegments(points, segments);
+  const forceClosed = appendForceClosingSegments(points, segments);
 
   if (points.length < 3 || segments.length === 0) {
     return null;
@@ -256,14 +277,14 @@ export function getLooseEdgeLoopFillData(edge: HoveredEdge): LooseEdgeLoopFillDa
     .multiplyScalar(1 / points.length);
   const referenceNormal = new THREE.Vector3();
   const outsideNormal = new THREE.Vector3();
-  const objectCenter = getMeshObjectLocalCenter(edge.mesh, edge.objectId);
+  const objectCenter = getMeshObjectLocalCenter(firstEdge.mesh, firstEdge.objectId);
 
   if (objectCenter) {
     outsideNormal.subVectors(center, objectCenter);
   }
 
   if (segmentsByKey instanceof Map) {
-    loop.segmentKeys.forEach((key) => {
+    loopSegmentKeys.forEach((key) => {
       const segment = segmentsByKey.get(key);
 
       if (segment) {
@@ -308,14 +329,17 @@ export function getLooseEdgeLoopFillData(edge: HoveredEdge): LooseEdgeLoopFillDa
   };
 }
 
-export function getLooseEdgeLoopCapAxisData(
+export function getLooseEdgeLoopFillData(edge: HoveredEdge): LooseEdgeLoopFillData | null {
+  return getLooseEdgeLoopsFillData([edge]);
+}
+
+export function getLooseEdgeLoopCapAxisDataFromData(
   edge: HoveredEdge,
+  data: LooseEdgeLoopFillData,
   mode: LooseEdgeLoopMode,
   normalTarget: THREE.Vector3 | null = null,
 ): LooseEdgeLoopCapAxisData | null {
-  const data = getLooseEdgeLoopFillData(edge);
-
-  if (!data || mode === "none") {
+  if (mode === "none") {
     return null;
   }
 
@@ -349,6 +373,31 @@ export function getLooseEdgeLoopCapAxisData(
     defaultOffset:
       mode === "fill" ? 0 : projectionSize > 0.000001 ? projectionSize : fallbackOffset,
   };
+}
+
+export function getLooseEdgeLoopCapAxisDataForEdges(
+  edge: HoveredEdge,
+  edges: HoveredEdge[],
+  mode: LooseEdgeLoopMode,
+  normalTarget: THREE.Vector3 | null = null,
+) {
+  const data = getLooseEdgeLoopsFillData(edges);
+
+  return data ? getLooseEdgeLoopCapAxisDataFromData(edge, data, mode, normalTarget) : null;
+}
+
+export function getLooseEdgeLoopCapAxisData(
+  edge: HoveredEdge,
+  mode: LooseEdgeLoopMode,
+  normalTarget: THREE.Vector3 | null = null,
+): LooseEdgeLoopCapAxisData | null {
+  const data = getLooseEdgeLoopFillData(edge);
+
+  if (!data || mode === "none") {
+    return null;
+  }
+
+  return getLooseEdgeLoopCapAxisDataFromData(edge, data, mode, normalTarget);
 }
 
 export function getLooseEdgeLoopCapOffsetBounds(
@@ -630,7 +679,23 @@ export function createLooseEdgeLoopFill(
   normalTarget: THREE.Vector3 | null = null,
   cone = false,
 ) {
-  const axisData = getLooseEdgeLoopCapAxisData(edge, mode, normalTarget);
+  const data = getLooseEdgeLoopFillData(edge);
+
+  return data
+    ? createLooseEdgeLoopFillFromData(edge, data, mode, capOffset, normalTarget, cone)
+    : null;
+}
+
+export function createLooseEdgeLoopFillFromData(
+  edge: HoveredEdge,
+  data: LooseEdgeLoopFillData,
+  mode: LooseEdgeLoopMode,
+  capOffset: number,
+  normalTarget: THREE.Vector3 | null = null,
+  cone = false,
+  fillKey = getLooseEdgeLoopFillKey(edge),
+) {
+  const axisData = getLooseEdgeLoopCapAxisDataFromData(edge, data, mode, normalTarget);
 
   if (!axisData) {
     return null;
@@ -667,7 +732,7 @@ export function createLooseEdgeLoopFill(
   fill.matrix.copy(edge.mesh.matrix);
   fill.matrixAutoUpdate = edge.mesh.matrixAutoUpdate;
   fill.userData.isLooseEdgeFillOverlay = true;
-  fill.userData.fillKey = getLooseEdgeLoopFillKey(edge);
+  fill.userData.fillKey = fillKey;
   fill.userData.loopId = edge.loopId;
   fill.userData.objectId = edge.objectId;
   fill.userData.sourceMeshUuid = edge.mesh.uuid;

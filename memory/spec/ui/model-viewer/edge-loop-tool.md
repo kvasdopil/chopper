@@ -20,16 +20,24 @@ Related documents:
 - Obstructed loose edges render as thinner lines.
 - Loose-edge contact spans with no generated geometry state render red.
 - Contact spans with generated cap, extrusion, or cylinder state render green.
-- Matching boundary spans that share generated-geometry state also render green so paired or visually matching boundaries communicate the same state.
+- Open/unclosed contact spans with no generated geometry state render magenta.
+- Open/unclosed contact spans with generated cap, extrusion, or cylinder state render deep green.
+- Matching boundary spans that share generated-geometry state also render with the capped color so paired or visually matching boundaries communicate the same state.
 
 ## Contact-Span Selection
 
 - Hovering near an unobstructed loose edge on any visible submesh highlights that edge's connected contact span in yellow.
 - Loose-edge segments that are not part of a valid contact span remain outside hover, selection, and generation.
 - Clicking a hovered contact span selects it and clears active mesh/object selection.
+- Shift-clicking contact spans in the same source mesh adds or removes them from the loop selection.
+- Shift-clicking a contact span from another source mesh starts a new loop selection.
+- The most recently selected contact span is the primary span for panel state and viewport adjustment handles.
+- Loop panel mode and cone changes apply to every selected contact span.
+- When multiple contact spans from one mesh are selected, generated cap, extrusion, and cylinder geometry treats them as one grouped loop source with one shared axis and one viewport transform gizmo.
+- Grouped generation force-closes open endpoints when possible before creating fill, extrusion, or cylinder geometry.
+- If grouped selected spans have paired spans on an adjacent mesh, the adjacent spans are generated as the corresponding grouped cap/extrusion/cylinder copy.
 - A selected contact span remains highlighted in yellow.
 - Contact-span hover works on any visible submesh, even when loose-edge lines are visible only for the currently selected object.
-- Shift-click does not select contact spans.
 - Contact-span hover is suppressed while separation mode is active.
 
 ## Generation Controls
@@ -42,6 +50,10 @@ Related documents:
   - `Cone`: enabled for extrusion and cylinder modes.
 - Axis is enabled only for extrusion and cylinder modes.
 - `Cap` maps to filled-cap generation.
+- The panel includes a `Remove loop` action at the bottom. It is enabled only when the selected contact span comes from intentional boundary-cut metadata.
+- `Remove loop` is gated by a confirmation dialog.
+- Confirming `Remove loop` removes generated cap, extrusion, or cylinder state for the selected span/group, clears the underlying cut metadata, and joins an adjacent cut-created object back into the selected object when needed so the visible cutting loop disappears.
+- Removing a loop does not delete ordinary object-boundary spans that were not created from boundary-cut metadata.
 
 ## Filled Caps
 
@@ -92,5 +104,10 @@ Related documents:
 
 - Generated cap, extrusion, and cylinder geometry is visible from both sides.
 - When an object or contact span is selected, visible generated geometry remains opaque where unobstructed and shows model-obstructed fragments as a translucent overlay.
+
+## Performance Notes
+
+- Loose-edge cache rebuilds derive candidate segments from the stable mesh edit edge index instead of re-walking each triangle edge.
+- Boundary-loop cuts and apply-separation refresh only the changed source mesh's loose-edge overlay/cache; unchanged meshes reuse their existing loose-edge cache.
 - Existing loop-generation choices survive topology refresh when the same boundary can still be identified.
 - Rebuilding loose-edge groups alone must not create generated geometry for loops whose mode is still `None`.

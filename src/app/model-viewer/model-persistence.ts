@@ -186,22 +186,30 @@ export function getPersistedLoopCapState(
     return null;
   }
 
-  let segmentKeys: string[] | null = null;
+  const groupSegmentKeys: string[][] = [];
 
   loopsById.forEach((loop) => {
-    if (segmentKeys || getLooseEdgeLoopCacheKey(mesh, loop) !== key) {
+    const loopKey = getLooseEdgeLoopCacheKey(mesh, loop);
+
+    if (state.groupLoopKeys?.includes(loopKey)) {
+      groupSegmentKeys.push([...loop.segmentKeys].sort());
       return;
     }
 
-    segmentKeys = [...loop.segmentKeys].sort();
+    if (state.groupLoopKeys || groupSegmentKeys.length > 0 || loopKey !== key) {
+      return;
+    }
+
+    groupSegmentKeys.push([...loop.segmentKeys].sort());
   });
 
-  if (!segmentKeys) {
+  if (groupSegmentKeys.length === 0) {
     return null;
   }
 
   return {
     cone: state.cone,
+    groupSegmentKeys: groupSegmentKeys.length > 1 ? groupSegmentKeys : undefined,
     meshIndex,
     mode: state.mode,
     normalAxisTarget: state.normalAxisTarget
@@ -212,7 +220,7 @@ export function getPersistedLoopCapState(
       : null,
     objectId: state.objectId,
     offset: state.offset,
-    segmentKeys,
+    segmentKeys: groupSegmentKeys[0],
   };
 }
 
@@ -229,11 +237,19 @@ export function createPersistedViewerState(
     .map((mesh, meshIndex) => getPersistedMeshState(mesh, meshIndex))
     .filter((meshState): meshState is PersistedMeshState => meshState !== null);
   const persistedLoopCapStates: PersistedLoopCapState[] = [];
+  const persistedLoopCapStateKeys = new Set<string>();
 
   loopCapStates.forEach((state, key) => {
+    const stateKey = state.groupLoopKeys?.join("||") ?? key;
+
+    if (persistedLoopCapStateKeys.has(stateKey)) {
+      return;
+    }
+
     const persistedState = getPersistedLoopCapState(meshes, key, state);
 
     if (persistedState) {
+      persistedLoopCapStateKeys.add(stateKey);
       persistedLoopCapStates.push(persistedState);
     }
   });
@@ -306,11 +322,19 @@ export function createViewerHistorySnapshot(
   const includeMeshes = options.includeMeshes ?? true;
   const meshes = collectSelectableMeshes(modelRoot);
   const loopCapStateSnapshots: PersistedLoopCapState[] = [];
+  const loopCapStateSnapshotKeys = new Set<string>();
 
   loopCapStates.forEach((state, key) => {
+    const stateKey = state.groupLoopKeys?.join("||") ?? key;
+
+    if (loopCapStateSnapshotKeys.has(stateKey)) {
+      return;
+    }
+
     const persistedState = getPersistedLoopCapState(meshes, key, state);
 
     if (persistedState) {
+      loopCapStateSnapshotKeys.add(stateKey);
       loopCapStateSnapshots.push(persistedState);
     }
   });

@@ -129,7 +129,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const capNormalTransformHelperRef = useRef<THREE.Object3D | null>(null);
   const rememberedTriangleSelectionRef = useRef<RememberedTriangleSelection | null>(null);
   const selectedLooseEdgeLoopRef = useRef<HoveredEdge | null>(null);
-  const selectedLooseEdgeLoopOverlayRef = useRef<LineSegments2 | null>(null);
+  const selectedLooseEdgeLoopsRef = useRef<HoveredEdge[]>([]);
+  const selectedLooseEdgeLoopOverlayRef = useRef<Map<string, LineSegments2>>(new Map());
   const currentModelSourceRef = useRef<PersistedModelSource | null>(null);
   const autoNameAbortControllerRef = useRef<AbortController | null>(null);
   const autoNameDebugImageUrlRef = useRef<string | null>(null);
@@ -155,7 +156,9 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   >(null);
   const clearSelectedLooseEdgeLoopHandlerRef = useRef<(() => void) | null>(null);
   const hideSelectedObjectHandlerRef = useRef<(() => void) | null>(null);
-  const selectLooseEdgeLoopHandlerRef = useRef<((edge: HoveredEdge) => void) | null>(null);
+  const selectLooseEdgeLoopHandlerRef = useRef<
+    ((edge: HoveredEdge, additive?: boolean) => void) | null
+  >(null);
   const selectSeparatedObjectHandlerRef = useRef<
     ((objectId: number, additive?: boolean) => void) | null
   >(null);
@@ -219,6 +222,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const [selectedObjectId, setSelectedObjectId] = useState<number | null>(null);
   const [selectedObjectIds, setSelectedObjectIds] = useState<Set<number>>(new Set());
   const [selectedLooseEdgeLoopActive, setSelectedLooseEdgeLoopActive] = useState(false);
+  const [selectedLooseEdgeLoopRemovable, setSelectedLooseEdgeLoopRemovable] = useState(false);
   const [textureAvailable, setTextureAvailable] = useState(false);
   const [textureVisible, setTextureVisible] = useState(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
@@ -292,11 +296,12 @@ export function ModelViewer({ tools }: ModelViewerProps) {
 
   const getFocusedObjectIds = () => {
     const focusedObjectIds = new Set(selectedObjectIdsRef.current);
-    const selectedLoop = selectedLooseEdgeLoopRef.current;
 
-    if (selectedLoop && !hiddenObjectIdsRef.current.has(selectedLoop.objectId)) {
-      focusedObjectIds.add(selectedLoop.objectId);
-    }
+    selectedLooseEdgeLoopsRef.current.forEach((selectedLoop) => {
+      if (!hiddenObjectIdsRef.current.has(selectedLoop.objectId)) {
+        focusedObjectIds.add(selectedLoop.objectId);
+      }
+    });
 
     return focusedObjectIds;
   };
@@ -357,11 +362,9 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       });
     });
 
-    const selectedLoop = selectedLooseEdgeLoopRef.current;
-
-    if (selectedLoop) {
+    selectedLooseEdgeLoopsRef.current.forEach((selectedLoop) => {
       setLooseEdgeLoopColor(selectedLoop.mesh, selectedLoop.loopId, selectedLooseEdgeLoopColor);
-    }
+    });
   };
 
   const persistViewerStateNow = async () => {
@@ -492,6 +495,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     getLooseEdgeLoopCapState,
     handleLooseEdgeLoopConeChange,
     handleLooseEdgeLoopModeChange,
+    handleRemoveSelectedLooseEdgeLoop,
     refreshLooseEdgeLoopCapVisibility,
     removeCapOffsetGizmo,
     restoreLooseEdgeLoopCapStates,
@@ -510,8 +514,10 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     capNormalTransformHelperRef,
     looseEdgeLoopCapStatesRef,
     selectedLooseEdgeLoopRef,
+    selectedLooseEdgeLoopsRef,
     selectedLooseEdgeLoopOverlayRef,
     hiddenObjectIdsRef,
+    objectNamesRef,
     selectedObjectIdRef,
     isEdgeLoopCapToolEnabled,
     isEdgeLoopCapToolEnabledRef,
@@ -524,6 +530,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     setLooseEdgeLoopCone,
     setLooseEdgeLoopMode,
     setSelectedLooseEdgeLoopActive,
+    setSelectedLooseEdgeLoopRemovable,
+    setSeparatedObjects,
   });
 
   const resetViewerStateForModelLoad = () => {
@@ -596,7 +604,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     selectionBoundaryLoopOverlayRef,
     linkedFaceSelectionThresholdRef,
     rememberedTriangleSelectionRef,
-    selectedLooseEdgeLoopRef,
+    selectedLooseEdgeLoopsRef,
     hiddenObjectIdsRef,
     textureVisibleRef,
     objectNamesRef,
@@ -830,6 +838,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     hoveredEdgeRef,
     linkedFaceSelectionRef,
     selectionBoundaryLoopsRef,
+    selectedLooseEdgeLoopsRef,
     hiddenObjectIdsRef,
     separateModeActiveRef,
     separationBusyRef,
@@ -1248,8 +1257,8 @@ export function ModelViewer({ tools }: ModelViewerProps) {
   const objectListSelectedIds =
     selectedObjectIds.size > 0
       ? selectedObjectIds
-      : selectedLooseEdgeLoopActive && selectedLooseEdgeLoopRef.current
-        ? new Set([selectedLooseEdgeLoopRef.current.objectId])
+      : selectedLooseEdgeLoopActive
+        ? new Set(selectedLooseEdgeLoopsRef.current.map((selectedLoop) => selectedLoop.objectId))
         : new Set<number>();
 
   return (
@@ -1311,10 +1320,12 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       {isEdgeLoopCapToolEnabled ? (
         <EdgeLoopCapToolPanel
           active={selectedLooseEdgeLoopActive}
+          canRemoveLoop={selectedLooseEdgeLoopRemovable}
           cone={looseEdgeLoopCone}
           mode={looseEdgeLoopMode}
           onConeChange={handleLooseEdgeLoopConeChange}
           onModeChange={handleLooseEdgeLoopModeChange}
+          onRemoveLoop={handleRemoveSelectedLooseEdgeLoop}
         />
       ) : null}
       {autoNameDebug ? (

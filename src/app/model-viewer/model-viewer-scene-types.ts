@@ -35,6 +35,7 @@ export type ModelViewerSceneParams = {
   capOffsetGizmoHandleRef: MutableRef<THREE.Object3D | null>;
   capOffsetGizmoRef: MutableRef<THREE.Group | null>;
   selectedLooseEdgeLoopRef: MutableRef<HoveredEdge | null>;
+  selectedLooseEdgeLoopsRef: MutableRef<HoveredEdge[]>;
   hoveredEdgeRef: MutableRef<HoveredEdge | null>;
   linkedFaceSelectionRef: MutableRef<LinkedFaceSelectionDetails | null>;
   selectionBoundaryLoopsRef: MutableRef<SelectionBoundaryLoop[]>;
@@ -60,7 +61,9 @@ export type ModelViewerSceneParams = {
     ((edge: HoveredEdge, offset: number) => void) | null
   >;
   separateByBoundaryLoopHandlerRef: MutableRef<((loopId: number) => void) | null>;
-  selectLooseEdgeLoopHandlerRef: MutableRef<((edge: HoveredEdge) => void) | null>;
+  selectLooseEdgeLoopHandlerRef: MutableRef<
+    ((edge: HoveredEdge, additive?: boolean) => void) | null
+  >;
   clearSelectedLooseEdgeLoopHandlerRef: MutableRef<(() => void) | null>;
   selectLinkedFaceHandlerRef: MutableRef<
     ((mesh: THREE.Mesh, triangleIndex: number) => void) | null

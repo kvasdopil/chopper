@@ -13,6 +13,7 @@ import {
   looseEdgeHoverOverlayLineWidth,
   looseEdgeHoverRenderOrder,
   looseEdgeUiOverlayLineWidth,
+  unclosedLooseEdgeColor,
   getLooseEdgeKey,
   getTriangleObjectIds,
   getVertexKey,
@@ -248,6 +249,53 @@ export function createLooseEdgeGeometry(
       startPositionKey: string;
     }
   >();
+  const addEdgeSegment = ({
+    edgeId,
+    edgeKey,
+    end,
+    endKey,
+    normal,
+    objectId,
+    splitKey,
+    start,
+    startKey,
+  }: {
+    edgeId?: number;
+    edgeKey: string;
+    end: THREE.Vector3;
+    endKey: string;
+    normal: THREE.Vector3;
+    objectId: number;
+    splitKey?: string;
+    start: THREE.Vector3;
+    startKey: string;
+  }) => {
+    const startPositionKey = getLoopFillPointKey(start);
+    const endPositionKey = getLoopFillPointKey(end);
+    const positionEdgeKey = getLooseEdgePositionEdgeKey(start, end);
+    const key = getLooseEdgeKey(objectId, splitKey ?? edgeKey);
+    const existing = edgeSegments.get(key);
+
+    if (existing) {
+      existing.count += 1;
+      return;
+    }
+
+    edgeSegments.set(key, {
+      count: 1,
+      end,
+      endKey,
+      endPositionKey,
+      edgeId,
+      edgeKey,
+      normal: normal.clone(),
+      objectId,
+      positionEdgeKey,
+      start,
+      startKey,
+      startPositionKey,
+    });
+  };
 
   if (!(position instanceof THREE.BufferAttribute)) {
     geometry.userData.segmentCount = 0;
@@ -258,62 +306,78 @@ export function createLooseEdgeGeometry(
     return geometry;
   }
 
-  for (let index = 0; index < position.count; index += 3) {
-    const triangleIndex = index / 3;
-    const objectId = objectIds?.[triangleIndex] ?? defaultObjectId;
-    const face = editState?.faces[triangleIndex];
+  if (editState && objectIds) {
+    editState.edges.forEach((edge) => {
+      const start = new THREE.Vector3().fromBufferAttribute(position, edge.vertexIndexes[0]);
+      const end = new THREE.Vector3().fromBufferAttribute(position, edge.vertexIndexes[1]);
+      const isCutEdge = editState.edgeCut[edge.id] === 1;
 
-    const vertices = [
-      {
-        key: getVertexKey(position, index),
-        point: new THREE.Vector3().fromBufferAttribute(position, index),
-      },
-      {
-        key: getVertexKey(position, index + 1),
-        point: new THREE.Vector3().fromBufferAttribute(position, index + 1),
-      },
-      {
-        key: getVertexKey(position, index + 2),
-        point: new THREE.Vector3().fromBufferAttribute(position, index + 2),
-      },
-    ];
-    const normal = getTriangleNormal(vertices).normalize();
+      edge.faceIds.forEach((triangleIndex) => {
+        const face = editState.faces[triangleIndex];
 
-    [
-      { edgeSlot: 0, end: vertices[1], start: vertices[0] },
-      { edgeSlot: 1, end: vertices[2], start: vertices[1] },
-      { edgeSlot: 2, end: vertices[0], start: vertices[2] },
-    ].forEach(({ edgeSlot, start, end }) => {
-      const indexedEdgeKey = face?.edgeKeys[edgeSlot];
-      const edgeId = face?.edgeIds[edgeSlot];
-      const edgeKey = indexedEdgeKey ?? [start.key, end.key].sort().join("|");
-      const startPositionKey = getLoopFillPointKey(start.point);
-      const endPositionKey = getLoopFillPointKey(end.point);
-      const positionEdgeKey = getLooseEdgePositionEdgeKey(start.point, end.point);
-      const isCutEdge = edgeId != null && editState?.edgeCut[edgeId] === 1;
-      const key = getLooseEdgeKey(objectId, isCutEdge ? `${edgeKey}@${triangleIndex}` : edgeKey);
-      const existing = edgeSegments.get(key);
+        if (!face) {
+          return;
+        }
 
-      if (existing) {
-        existing.count += 1;
-        return;
-      }
+        const objectId = objectIds[triangleIndex] ?? defaultObjectId;
 
-      edgeSegments.set(key, {
-        count: 1,
-        end: end.point,
-        endKey: end.key,
-        endPositionKey,
-        edgeId,
-        edgeKey,
-        normal: normal.clone(),
-        objectId,
-        positionEdgeKey,
-        start: start.point,
-        startKey: start.key,
-        startPositionKey,
+        addEdgeSegment({
+          edgeId: edge.id,
+          edgeKey: edge.key,
+          end,
+          endKey: edge.vertexKeys[1],
+          normal: face.normal,
+          objectId,
+          splitKey: isCutEdge ? `${edge.key}@${triangleIndex}` : undefined,
+          start,
+          startKey: edge.vertexKeys[0],
+        });
       });
     });
+  } else {
+    for (let index = 0; index < position.count; index += 3) {
+      const triangleIndex = index / 3;
+      const objectId = objectIds?.[triangleIndex] ?? defaultObjectId;
+      const face = editState?.faces[triangleIndex];
+
+      const vertices = [
+        {
+          key: getVertexKey(position, index),
+          point: new THREE.Vector3().fromBufferAttribute(position, index),
+        },
+        {
+          key: getVertexKey(position, index + 1),
+          point: new THREE.Vector3().fromBufferAttribute(position, index + 1),
+        },
+        {
+          key: getVertexKey(position, index + 2),
+          point: new THREE.Vector3().fromBufferAttribute(position, index + 2),
+        },
+      ];
+      const normal = getTriangleNormal(vertices).normalize();
+
+      [
+        { edgeSlot: 0, end: vertices[1], start: vertices[0] },
+        { edgeSlot: 1, end: vertices[2], start: vertices[1] },
+        { edgeSlot: 2, end: vertices[0], start: vertices[2] },
+      ].forEach(({ edgeSlot, start, end }) => {
+        const indexedEdgeKey = face?.edgeKeys[edgeSlot];
+        const edgeId = face?.edgeIds[edgeSlot];
+        const edgeKey = indexedEdgeKey ?? [start.key, end.key].sort().join("|");
+        const isCutEdge = edgeId != null && editState?.edgeCut[edgeId] === 1;
+        addEdgeSegment({
+          edgeId,
+          edgeKey,
+          end: end.point,
+          endKey: end.key,
+          normal: normal.clone(),
+          objectId,
+          splitKey: isCutEdge ? `${edgeKey}@${triangleIndex}` : undefined,
+          start: start.point,
+          startKey: start.key,
+        });
+      });
+    }
   }
 
   const looseEdgeRecordsByPositionEdgeKey = new Map<
@@ -556,9 +620,45 @@ export function createLooseEdgeGeometry(
     );
   });
 
-  geometry.setPositions(segmentPositions);
-  geometry.setColors(segmentColors);
-  geometry.userData.segmentCount = segmentPositions.length / 6;
+  const unclosedColor = new THREE.Color(unclosedLooseEdgeColor);
+
+  looseEdgeLoopById.forEach((loop) => {
+    if (loop.isClosed) {
+      return;
+    }
+
+    const renderCache = looseEdgeRenderCacheByObjectId.get(loop.objectId);
+
+    if (!renderCache) {
+      return;
+    }
+
+    loop.segmentIndexes.forEach((segmentIndex) => {
+      if (segmentIndex < 0 || segmentIndex >= renderCache.segmentCount) {
+        return;
+      }
+
+      const colorIndex = segmentIndex * 6;
+
+      renderCache.colors[colorIndex] = unclosedColor.r;
+      renderCache.colors[colorIndex + 1] = unclosedColor.g;
+      renderCache.colors[colorIndex + 2] = unclosedColor.b;
+      renderCache.colors[colorIndex + 3] = unclosedColor.r;
+      renderCache.colors[colorIndex + 4] = unclosedColor.g;
+      renderCache.colors[colorIndex + 5] = unclosedColor.b;
+    });
+  });
+
+  const selectedRenderCache =
+    selectedObjectId != null && !hiddenObjectIds.has(selectedObjectId)
+      ? looseEdgeRenderCacheByObjectId.get(selectedObjectId)
+      : null;
+  const renderedPositions = selectedRenderCache?.positions ?? new Float32Array(segmentPositions);
+  const renderedColors = selectedRenderCache?.colors ?? new Float32Array(segmentColors);
+
+  geometry.setPositions(renderedPositions);
+  geometry.setColors(renderedColors);
+  geometry.userData.segmentCount = renderedPositions.length / 6;
   mesh.userData.looseEdgeKeys = looseEdgeKeys;
   mesh.userData.looseEdgeKeysByVertexKey = looseEdgeKeysByVertexKey;
   mesh.userData.looseEdgeLoopById = looseEdgeLoopById;

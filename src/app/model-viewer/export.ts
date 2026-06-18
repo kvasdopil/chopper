@@ -139,6 +139,7 @@ export function addGeneratedLoopGeometryToExportObjects(
   objectNames: ObjectNameMap,
 ) {
   const generatedGroupCountByObjectId = new Map<number, number>();
+  const exportedFillIds = new Set<string>();
 
   loopCapStates.forEach((state) => {
     const fill = state.fill;
@@ -146,6 +147,12 @@ export function addGeneratedLoopGeometryToExportObjects(
     if (!fill || state.mode === "none") {
       return;
     }
+
+    if (exportedFillIds.has(fill.uuid)) {
+      return;
+    }
+
+    exportedFillIds.add(fill.uuid);
 
     const positions: number[] = [];
 
@@ -439,9 +446,16 @@ function createEditorLoopCapStates(
   const sourceMeshes = collectSelectableMeshes(modelRoot);
   const exportedLoops = buildExportedLoopReferences(baseMeshes);
   const metadataStates: EditorGlbLoopCapState[] = [];
+  const metadataStateKeys = new Set<string>();
 
   loopCapStates.forEach((state, key) => {
     if (state.mode === "none") {
+      return;
+    }
+
+    const metadataStateKey = state.groupLoopKeys?.join("||") ?? key;
+
+    if (metadataStateKeys.has(metadataStateKey)) {
       return;
     }
 
@@ -459,8 +473,27 @@ function createEditorLoopCapStates(
       return;
     }
 
+    const groupSegmentKeys =
+      state.groupLoopKeys
+        ?.map((loopKey) => {
+          const groupSource = getLoopCapSourceLoop(sourceMeshes, loopKey, state);
+
+          if (!groupSource) {
+            return null;
+          }
+
+          const groupExportedLoop = exportedLoops.get(
+            `${state.objectId}:${getLoopWorldPairKey(groupSource.mesh, groupSource.loop)}`,
+          );
+
+          return groupExportedLoop ? [...groupExportedLoop.loop.segmentKeys].sort() : null;
+        })
+        .filter((item): item is string[] => Array.isArray(item)) ?? [];
+
+    metadataStateKeys.add(metadataStateKey);
     metadataStates.push({
       cone: state.cone,
+      groupSegmentKeys: groupSegmentKeys.length > 1 ? groupSegmentKeys : undefined,
       meshIndex: exportedLoop.meshIndex,
       mode: state.mode,
       normalAxisTarget: getEditorNormalTarget(source.mesh, state.normalAxisTarget),

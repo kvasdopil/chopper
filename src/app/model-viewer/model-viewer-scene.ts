@@ -34,6 +34,7 @@ import {
   setHoverEdgeOverlay,
   getLooseEdgeLoopDisplayColor,
   getLooseEdgeLoopCapAxisData,
+  getLooseEdgeLoopCapAxisDataForEdges,
   isNormalTargetLoopMode,
   updateHoverEdgeResolution,
   type HoveredEdge,
@@ -63,6 +64,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     capOffsetGizmoHandleRef,
     capOffsetGizmoRef,
     selectedLooseEdgeLoopRef,
+    selectedLooseEdgeLoopsRef,
     hoveredEdgeRef,
     linkedFaceSelectionRef,
     selectionBoundaryLoopsRef,
@@ -336,16 +338,17 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     let pointerStart: { edge: HoveredEdge | null; x: number; y: number } | null = null;
+    const isLooseEdgeLoopSelected = (edge: HoveredEdge) =>
+      selectedLooseEdgeLoopsRef.current.some((selectedLoop) =>
+        isSameLooseEdgeLoop(selectedLoop, edge),
+      );
 
     const clearHoveredEdge = () => {
       const currentEdge = hoveredEdgeRef.current;
 
       clearHoverEdgeOverlay(currentEdge);
 
-      if (
-        currentEdge?.isLooseEdge &&
-        !isSameLooseEdgeLoop(currentEdge, selectedLooseEdgeLoopRef.current)
-      ) {
+      if (currentEdge?.isLooseEdge && !isLooseEdgeLoopSelected(currentEdge)) {
         const loop = getLooseEdgeLoop(currentEdge.mesh, currentEdge.loopId);
 
         if (loop) {
@@ -378,7 +381,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
       }
 
       if (edge.isLooseEdge) {
-        if (isSameLooseEdgeLoop(edge, selectedLooseEdgeLoopRef.current)) {
+        if (isLooseEdgeLoopSelected(edge)) {
           clearHoverEdgeOverlay(edge);
         } else {
           setHoverEdgeOverlay(edge);
@@ -641,7 +644,17 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
         state && isNormalTargetLoopMode(state.mode)
           ? (state.normalAxisTarget ?? state.normalTarget)
           : (state?.normalTarget ?? null);
-      const axisData = state ? getLooseEdgeLoopCapAxisData(edge, state.mode, axisTarget) : null;
+      const axisData =
+        state && state.groupLoopKeys && state.groupLoopKeys.length > 1
+          ? getLooseEdgeLoopCapAxisDataForEdges(
+              edge,
+              selectedLooseEdgeLoopsRef.current,
+              state.mode,
+              axisTarget,
+            )
+          : state
+            ? getLooseEdgeLoopCapAxisData(edge, state.mode, axisTarget)
+            : null;
 
       if (!state || !axisData) {
         return null;
@@ -813,15 +826,16 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
 
       let clickedEdge: HoveredEdge | null = null;
 
-      if (!event.shiftKey) {
-        const hoveredEdge = hoveredEdgeRef.current;
+      const hoveredEdge = hoveredEdgeRef.current;
 
-        clickedEdge =
-          hoveredEdge?.isSelectionBoundary === true ||
-          (hoveredEdge?.isLooseEdge === true && !separateModeActiveRef.current)
-            ? hoveredEdge
-            : (getSelectionBoundaryEdgeAtPointer(event) ?? getLooseEdgeAtPointer(event));
-      }
+      clickedEdge = event.shiftKey
+        ? hoveredEdge?.isLooseEdge === true && !separateModeActiveRef.current
+          ? hoveredEdge
+          : getLooseEdgeAtPointer(event)
+        : hoveredEdge?.isSelectionBoundary === true ||
+            (hoveredEdge?.isLooseEdge === true && !separateModeActiveRef.current)
+          ? hoveredEdge
+          : (getSelectionBoundaryEdgeAtPointer(event) ?? getLooseEdgeAtPointer(event));
 
       pointerStart = {
         edge: clickedEdge,
@@ -888,6 +902,11 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
         return;
       }
 
+      if (clickedEdge?.isLooseEdge) {
+        selectLooseEdgeLoopHandlerRef.current?.(clickedEdge, true);
+        return;
+      }
+
       clearHoveredEdge();
       const triangle = getTriangleAtPointer(event);
 
@@ -923,7 +942,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
       }
 
       const edge = event.shiftKey
-        ? null
+        ? getLooseEdgeAtPointer(event)
         : (getSelectionBoundaryEdgeAtPointer(event) ?? getLooseEdgeAtPointer(event));
       const currentEdge = hoveredEdgeRef.current;
 

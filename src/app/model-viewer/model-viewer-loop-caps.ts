@@ -6,31 +6,44 @@ import {
   capOffsetGizmoMinLength,
   looseEdgeHoverRenderOrder,
   selectedLooseEdgeLoopColor,
+  applyObjectColors,
+  applySelectedObjectJoinPlan,
   clampLooseEdgeLoopCapOffset,
   clearHoverEdgeOverlay,
   collectSelectableMeshes,
+  collectSeparatedObjects,
+  createSelectedObjectJoinPlan,
   createLooseEdgeFromLoop,
-  createLooseEdgeLoopFill,
+  createLooseEdgeLoopFillFromData,
   createLooseEdgeLoopFillOcclusionOverlay,
   createLooseEdgeLoopOverlay,
   disposeLooseEdgeLoopFillOcclusionOverlay,
   disposeObject,
+  ensureMeshEditState,
   getLinkedLooseEdgeLoopMembers,
+  getLooseEdgeLoop,
   getLooseEdgeLoopCacheKey,
   getLooseEdgeLoopCapAxisData,
+  getLooseEdgeLoopCapAxisDataForEdges,
   getLooseEdgeLoopFillData,
+  getLooseEdgeLoopsFillData,
   getLooseEdgeLoopFillKey,
   getLooseEdgeLoopFromPersistedState,
+  getTriangleObjectIds,
   isDisposableDrawObject,
   isNormalTargetLoopMode,
   isSameLooseEdgeLoop,
   isSelectableMesh,
+  refreshLooseEdgeOverlay,
+  refreshObjectMaterialGroups,
   setLooseEdgeLoopColor,
+  setEdgesCut,
   setLooseEdgeLoopFillBaseMaterial,
   supportsConeLoopMode,
   type HoveredEdge,
   type LooseEdgeLoop,
   type LooseEdgeLoopCapState,
+  type LooseEdgeSegment,
 } from "./model-viewer-core";
 import type { PersistedLoopCapState } from "./persistence";
 import type { LooseEdgeLoopMode } from "../viewer-controls/types";
@@ -40,6 +53,17 @@ function getLoopCapAxisTarget(state: LooseEdgeLoopCapState) {
   return isNormalTargetLoopMode(state.mode)
     ? (state.normalAxisTarget ?? state.normalTarget)
     : state.normalTarget;
+}
+
+function getSelectedLoopKey(edge: HoveredEdge) {
+  return `${edge.mesh.uuid}:${edge.loopId ?? -1}`;
+}
+
+function getLoopGroupKey(edges: HoveredEdge[]) {
+  return edges
+    .map((edge) => getLooseEdgeLoopFillKey(edge))
+    .sort()
+    .join("||");
 }
 
 export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
@@ -54,8 +78,10 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     capNormalTransformHelperRef,
     looseEdgeLoopCapStatesRef,
     selectedLooseEdgeLoopRef,
+    selectedLooseEdgeLoopsRef,
     selectedLooseEdgeLoopOverlayRef,
     hiddenObjectIdsRef,
+    objectNamesRef,
     selectedObjectIdRef,
     isEdgeLoopCapToolEnabled,
     isEdgeLoopCapToolEnabledRef,
@@ -68,6 +94,8 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     setLooseEdgeLoopCone,
     setLooseEdgeLoopMode,
     setSelectedLooseEdgeLoopActive,
+    setSelectedLooseEdgeLoopRemovable,
+    setSeparatedObjects,
   } = params;
 
   const removeLooseEdgeLoopCapFill = (state: LooseEdgeLoopCapState) => {
@@ -169,6 +197,58 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
   const getLooseEdgeLoopMembers = (edge: HoveredEdge) =>
     getLinkedLooseEdgeLoopMembers(rootRef.current, edge);
 
+  const getLoopEdgeByCacheKey = (mesh: THREE.Mesh, key: string) => {
+    const loopsById = mesh.userData.looseEdgeLoopById as Map<number, LooseEdgeLoop> | undefined;
+
+    if (!(loopsById instanceof Map)) {
+      return null;
+    }
+
+    for (const loop of loopsById.values()) {
+      if (getLooseEdgeLoopCacheKey(mesh, loop) !== key) {
+        continue;
+      }
+
+      return createLooseEdgeFromLoop(mesh, loop);
+    }
+
+    return null;
+  };
+
+  const getStateSourceMesh = (state: LooseEdgeLoopCapState) => {
+    const modelRoot = rootRef.current;
+
+    return modelRoot
+      ? (collectSelectableMeshes(modelRoot).find((mesh) => mesh.uuid === state.sourceMeshUuid) ??
+          null)
+      : null;
+  };
+
+  const getLooseEdgeLoopCapStateEdges = (edge: HoveredEdge, state: LooseEdgeLoopCapState) => {
+    if (!state.groupLoopKeys || state.groupLoopKeys.length <= 1) {
+      return [edge];
+    }
+
+    const sourceMesh = getStateSourceMesh(state) ?? edge.mesh;
+    const edges = state.groupLoopKeys
+      .map((key) => getLoopEdgeByCacheKey(sourceMesh, key))
+      .filter((item): item is HoveredEdge => Boolean(item));
+
+    return edges.length > 0 ? edges : [edge];
+  };
+
+  const getLooseEdgeLoopCapStateAxisData = (
+    edge: HoveredEdge,
+    state: LooseEdgeLoopCapState,
+    normalTarget = getLoopCapAxisTarget(state),
+  ) => {
+    const edges = getLooseEdgeLoopCapStateEdges(edge, state);
+
+    return edges.length > 1
+      ? getLooseEdgeLoopCapAxisDataForEdges(edge, edges, state.mode, normalTarget)
+      : getLooseEdgeLoopCapAxisData(edge, state.mode, normalTarget);
+  };
+
   const getLooseEdgeLoopCapState = (edge: HoveredEdge) => {
     const directState = looseEdgeLoopCapStatesRef.current.get(getLooseEdgeLoopFillKey(edge));
 
@@ -181,6 +261,221 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
         .map((member) => looseEdgeLoopCapStatesRef.current.get(member.key))
         .find((state): state is LooseEdgeLoopCapState => Boolean(state)) ?? null
     );
+  };
+
+  const isSelectedLooseEdgeLoop = (edge: HoveredEdge) =>
+    selectedLooseEdgeLoopsRef.current.some((selectedLoop) =>
+      isSameLooseEdgeLoop(selectedLoop, edge),
+    );
+
+  const getEditableLooseEdgeLoops = (edge: HoveredEdge) => {
+    const sameMeshSelectedLoops = selectedLooseEdgeLoopsRef.current.filter(
+      (selectedLoop) => selectedLoop.mesh === edge.mesh,
+    );
+
+    return sameMeshSelectedLoops.some((selectedLoop) => isSameLooseEdgeLoop(selectedLoop, edge))
+      ? sameMeshSelectedLoops
+      : [edge];
+  };
+
+  const getLooseEdgeLoopCutEdgeIds = (edge: HoveredEdge) => {
+    const loop = getLooseEdgeLoop(edge.mesh, edge.loopId);
+    const segmentsByKey = edge.mesh.userData.looseEdgeSegmentsByKey as
+      | Map<string, LooseEdgeSegment>
+      | undefined;
+    const editState = ensureMeshEditState(edge.mesh);
+    const edgeIds = new Set<number>();
+
+    if (!loop || !(segmentsByKey instanceof Map) || !editState) {
+      return edgeIds;
+    }
+
+    loop.segmentKeys.forEach((segmentKey) => {
+      const segment = segmentsByKey.get(segmentKey);
+      const edgeId = segment?.edgeId;
+
+      if (edgeId != null && editState.edgeCut[edgeId] === 1) {
+        edgeIds.add(edgeId);
+      }
+    });
+
+    return edgeIds;
+  };
+
+  const getCutEdgeIdsByMeshForLoops = (edges: HoveredEdge[]) => {
+    const edgeIdsByMesh = new Map<THREE.Mesh, Set<number>>();
+
+    edges.forEach((edge) => {
+      getLooseEdgeLoopMembers(edge).forEach((member) => {
+        const edgeIds = getLooseEdgeLoopCutEdgeIds(member.edge);
+
+        if (edgeIds.size === 0) {
+          return;
+        }
+
+        let meshEdgeIds = edgeIdsByMesh.get(member.edge.mesh);
+
+        if (!meshEdgeIds) {
+          meshEdgeIds = new Set<number>();
+          edgeIdsByMesh.set(member.edge.mesh, meshEdgeIds);
+        }
+
+        edgeIds.forEach((edgeId) => {
+          meshEdgeIds.add(edgeId);
+        });
+      });
+    });
+
+    return edgeIdsByMesh;
+  };
+
+  const hasRemovableLooseEdgeLoops = (edges: HoveredEdge[]) =>
+    Array.from(getCutEdgeIdsByMeshForLoops(edges).values()).some((edgeIds) => edgeIds.size > 0);
+
+  const getLoopJoinObjectIds = (edges: HoveredEdge[]) => {
+    const objectIds = new Set<number>();
+
+    edges.forEach((edge) => {
+      getLooseEdgeLoopMembers(edge).forEach((member) => {
+        const loop = getLooseEdgeLoop(member.edge.mesh, member.edge.loopId);
+
+        if (!loop || getLooseEdgeLoopCutEdgeIds(member.edge).size === 0) {
+          return;
+        }
+
+        objectIds.add(member.edge.objectId);
+        loop.contactObjectIds.forEach((objectId) => {
+          objectIds.add(objectId);
+        });
+      });
+    });
+
+    return objectIds;
+  };
+
+  const getMeshesForObjectIds = (modelRoot: THREE.Object3D, objectIds: Set<number>) => {
+    if (objectIds.size === 0) {
+      return new Set<THREE.Mesh>();
+    }
+
+    const meshes = new Set<THREE.Mesh>();
+
+    collectSelectableMeshes(modelRoot).forEach((mesh) => {
+      const triangleObjectIds = getTriangleObjectIds(mesh);
+
+      if (!triangleObjectIds) {
+        return;
+      }
+
+      for (let index = 0; index < triangleObjectIds.length; index += 1) {
+        if (objectIds.has(triangleObjectIds[index] ?? 0)) {
+          meshes.add(mesh);
+          return;
+        }
+      }
+    });
+
+    return meshes;
+  };
+
+  const refreshSeparatedObjectList = (modelRoot: THREE.Object3D | null = rootRef.current) => {
+    setSeparatedObjects(
+      modelRoot
+        ? collectSeparatedObjects(modelRoot, hiddenObjectIdsRef.current, objectNamesRef.current)
+        : [],
+    );
+  };
+
+  const getLoopCapEditGroups = (edge: HoveredEdge) => {
+    const selectedEdges = getEditableLooseEdgeLoops(edge);
+    const groups = new Map<
+      string,
+      {
+        edges: HoveredEdge[];
+        keys: string[];
+        primaryEdge: HoveredEdge;
+      }
+    >();
+
+    selectedEdges.forEach((selectedEdge) => {
+      getLooseEdgeLoopMembers(selectedEdge).forEach((member) => {
+        const groupKey = `${member.edge.mesh.uuid}:${member.edge.objectId}`;
+        const existingGroup = groups.get(groupKey);
+        const loopKey = member.key;
+
+        if (existingGroup) {
+          if (!existingGroup.keys.includes(loopKey)) {
+            existingGroup.edges.push(member.edge);
+            existingGroup.keys.push(loopKey);
+          }
+          return;
+        }
+
+        groups.set(groupKey, {
+          edges: [member.edge],
+          keys: [loopKey],
+          primaryEdge: member.edge,
+        });
+      });
+    });
+
+    return Array.from(groups.values()).map((group) => ({
+      ...group,
+      keys: [...group.keys].sort(),
+    }));
+  };
+
+  const refreshSelectedLooseEdgeLoopState = (preferredPrimary: HoveredEdge | null = null) => {
+    const selectedLoops = selectedLooseEdgeLoopsRef.current;
+    const primary =
+      preferredPrimary && isSelectedLooseEdgeLoop(preferredPrimary)
+        ? preferredPrimary
+        : (selectedLoops[selectedLoops.length - 1] ?? null);
+
+    selectedLooseEdgeLoopRef.current = primary;
+    setSelectedLooseEdgeLoopActive(selectedLoops.length > 0);
+    setSelectedLooseEdgeLoopRemovable(hasRemovableLooseEdgeLoops(selectedLoops));
+
+    if (primary) {
+      setLooseEdgeLoopMode(getLooseEdgeLoopCapMode(primary));
+      setLooseEdgeLoopCone(getLooseEdgeLoopCapCone(primary));
+      refreshCapOffsetGizmo(primary);
+    } else {
+      setLooseEdgeLoopMode("none");
+      setLooseEdgeLoopCone(false);
+      removeCapOffsetGizmo();
+    }
+
+    refreshLooseEdgeLoopCapVisibility();
+    refreshViewportObjectOutlines(primary?.mesh.parent ?? rootRef.current);
+    refreshLooseEdgeLoopDisplayColors(primary?.mesh.parent ?? rootRef.current);
+  };
+
+  const removeSelectedLooseEdgeLoopOverlay = (edge: HoveredEdge) => {
+    const key = getSelectedLoopKey(edge);
+    const overlay = selectedLooseEdgeLoopOverlayRef.current.get(key);
+
+    if (!overlay) {
+      return;
+    }
+
+    overlay.parent?.remove(overlay);
+    disposeObject(overlay);
+    selectedLooseEdgeLoopOverlayRef.current.delete(key);
+  };
+
+  const addSelectedLooseEdgeLoopOverlay = (edge: HoveredEdge) => {
+    removeSelectedLooseEdgeLoopOverlay(edge);
+    setLooseEdgeLoopColor(edge.mesh, edge.loopId, selectedLooseEdgeLoopColor);
+
+    const overlay = createLooseEdgeLoopOverlay(edge, selectedLooseEdgeLoopColor);
+
+    if (!overlay) {
+      return;
+    }
+
+    (edge.mesh.parent ?? rootRef.current)?.add(overlay);
+    selectedLooseEdgeLoopOverlayRef.current.set(getSelectedLoopKey(edge), overlay);
   };
 
   const getMirroredLoopNormalTarget = (
@@ -211,6 +506,34 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     return memberEdge.mesh.worldToLocal(targetWorld);
   };
 
+  const getMirroredGroupNormalTarget = (
+    sourceGroup: { edges: HoveredEdge[]; primaryEdge: HoveredEdge },
+    memberGroup: { edges: HoveredEdge[]; primaryEdge: HoveredEdge },
+    sourceAxis: THREE.Vector3,
+    offset: number,
+  ) => {
+    const sourceData = getLooseEdgeLoopsFillData(sourceGroup.edges);
+    const memberData = getLooseEdgeLoopsFillData(memberGroup.edges);
+
+    if (!sourceData || !memberData || sourceAxis.lengthSq() === 0) {
+      return null;
+    }
+
+    sourceGroup.primaryEdge.mesh.updateMatrixWorld(true);
+    memberGroup.primaryEdge.mesh.updateMatrixWorld(true);
+
+    const targetDistance = Math.max(Math.abs(offset), 0.001);
+    const sourceCenterWorld = sourceGroup.primaryEdge.mesh.localToWorld(sourceData.center.clone());
+    const sourceTargetWorld = sourceGroup.primaryEdge.mesh.localToWorld(
+      sourceData.center.clone().addScaledVector(sourceAxis, targetDistance),
+    );
+    const sourceOffsetWorld = sourceTargetWorld.sub(sourceCenterWorld);
+    const memberCenterWorld = memberGroup.primaryEdge.mesh.localToWorld(memberData.center.clone());
+    const targetWorld = memberCenterWorld.add(sourceOffsetWorld);
+
+    return memberGroup.primaryEdge.mesh.worldToLocal(targetWorld);
+  };
+
   const refreshCapOffsetGizmo = (edge = selectedLooseEdgeLoopRef.current) => {
     const modelRoot = rootRef.current;
 
@@ -221,9 +544,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
 
     const key = getLooseEdgeLoopFillKey(edge);
     const state = getLooseEdgeLoopCapState(edge);
-    const axisData = state
-      ? getLooseEdgeLoopCapAxisData(edge, state.mode, getLoopCapAxisTarget(state))
-      : null;
+    const axisData = state ? getLooseEdgeLoopCapStateAxisData(edge, state) : null;
     const parent = edge.mesh.parent ?? modelRoot;
 
     if (
@@ -371,7 +692,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     key: string,
     state: LooseEdgeLoopCapState,
   ) => {
-    const axisData = getLooseEdgeLoopCapAxisData(edge, state.mode, getLoopCapAxisTarget(state));
+    const axisData = getLooseEdgeLoopCapStateAxisData(edge, state);
 
     if (!axisData) {
       return;
@@ -409,27 +730,40 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       );
     }
 
-    const fill = createLooseEdgeLoopFill(
-      edge,
-      state.mode,
-      state.offset,
-      getLoopCapAxisTarget(state),
-      state.cone,
-    );
+    const stateEdges = getLooseEdgeLoopCapStateEdges(edge, state);
+    const fillData =
+      stateEdges.length > 1
+        ? getLooseEdgeLoopsFillData(stateEdges)
+        : getLooseEdgeLoopFillData(edge);
+    const stateKeys =
+      state.groupLoopKeys && state.groupLoopKeys.length > 0 ? state.groupLoopKeys : [key];
+    const fillKey =
+      state.groupLoopKeys && state.groupLoopKeys.length > 1 ? getLoopGroupKey(stateEdges) : key;
+    const fill = fillData
+      ? createLooseEdgeLoopFillFromData(
+          edge,
+          fillData,
+          state.mode,
+          state.offset,
+          getLoopCapAxisTarget(state),
+          state.cone,
+          fillKey,
+        )
+      : null;
     const parent = edge.mesh.parent ?? rootRef.current;
 
     if (!fill || !parent) {
       if (fill) {
         disposeObject(fill);
       }
-      looseEdgeLoopCapStatesRef.current.set(key, state);
+      stateKeys.forEach((stateKey) => looseEdgeLoopCapStatesRef.current.set(stateKey, state));
       return;
     }
 
     parent.add(fill);
     fill.visible = !hiddenObjectIdsRef.current.has(edge.objectId);
     state.fill = fill;
-    looseEdgeLoopCapStatesRef.current.set(key, state);
+    stateKeys.forEach((stateKey) => looseEdgeLoopCapStatesRef.current.set(stateKey, state));
     refreshLooseEdgeLoopCapVisibility();
   };
 
@@ -461,6 +795,19 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       }
 
       const key = getLooseEdgeLoopFillKey(edge);
+      const groupedEdges =
+        capState.groupSegmentKeys && capState.groupSegmentKeys.length > 1
+          ? capState.groupSegmentKeys
+              .map((segmentKeys) =>
+                getLooseEdgeLoopFromPersistedState(mesh, { ...capState, segmentKeys }),
+              )
+              .map((groupLoop) => (groupLoop ? createLooseEdgeFromLoop(mesh, groupLoop) : null))
+              .filter((item): item is HoveredEdge => Boolean(item))
+          : [edge];
+      const groupLoopKeys =
+        groupedEdges.length > 1
+          ? groupedEdges.map((groupEdge) => getLooseEdgeLoopFillKey(groupEdge)).sort()
+          : undefined;
       const normalTarget =
         capState.normalTarget && capState.mode !== "fill"
           ? new THREE.Vector3(
@@ -481,7 +828,10 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       const axisTarget = isNormalTargetLoopMode(capState.mode)
         ? (normalAxisTarget ?? normalTarget)
         : normalTarget;
-      const axisData = getLooseEdgeLoopCapAxisData(edge, capState.mode, axisTarget);
+      const axisData =
+        groupedEdges.length > 1
+          ? getLooseEdgeLoopCapAxisDataForEdges(edge, groupedEdges, capState.mode, axisTarget)
+          : getLooseEdgeLoopCapAxisData(edge, capState.mode, axisTarget);
 
       if (!axisData) {
         hadInvalidState = true;
@@ -491,6 +841,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       const state: LooseEdgeLoopCapState = {
         cone: capState.cone === true,
         fill: null,
+        groupLoopKeys,
         mode: capState.mode,
         normalAxisTarget,
         normalTarget,
@@ -525,7 +876,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     return hadInvalidState;
   };
 
-  const setLooseEdgeLoopCapTarget = (edge: HoveredEdge, target: THREE.Vector3) => {
+  const setLooseEdgeLoopCapTargetSingle = (edge: HoveredEdge, target: THREE.Vector3) => {
     if (!isEdgeLoopCapToolEnabledRef.current) {
       return;
     }
@@ -647,7 +998,11 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     return state && supportsConeLoopMode(state.mode) ? state.cone : false;
   };
 
-  const setLooseEdgeLoopCapMode = (edge: HoveredEdge, mode: LooseEdgeLoopMode) => {
+  const setLooseEdgeLoopCapModeSingle = (
+    edge: HoveredEdge,
+    mode: LooseEdgeLoopMode,
+    recordHistory = true,
+  ) => {
     if (!isEdgeLoopCapToolEnabledRef.current) {
       return;
     }
@@ -674,7 +1029,9 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       );
 
       if (hadExistingState) {
-        pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+        if (recordHistory) {
+          pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+        }
         members.forEach((member) => {
           const memberState = looseEdgeLoopCapStatesRef.current.get(member.key);
 
@@ -689,15 +1046,20 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       refreshCapOffsetGizmo(edge);
       refreshLooseEdgeLoopDisplayColors(edge.mesh.parent ?? rootRef.current);
       schedulePersistViewerState();
-      return;
+      return hadExistingState;
     }
 
     if (!axisData) {
       refreshCapOffsetGizmo(edge);
-      return;
+      return false;
     }
 
-    if (!existingState || existingMode !== mode) {
+    const missingMemberState = members.some(
+      (member) => !looseEdgeLoopCapStatesRef.current.has(member.key),
+    );
+    const changed = !existingState || existingMode !== mode || missingMemberState;
+
+    if (changed && recordHistory) {
       pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
     }
 
@@ -754,9 +1116,14 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     refreshCapOffsetGizmo(edge);
     refreshLooseEdgeLoopDisplayColors(edge.mesh.parent ?? rootRef.current);
     schedulePersistViewerState();
+    return changed;
   };
 
-  const setLooseEdgeLoopCapCone = (edge: HoveredEdge, cone: boolean) => {
+  const setLooseEdgeLoopCapConeSingle = (
+    edge: HoveredEdge,
+    cone: boolean,
+    recordHistory = true,
+  ) => {
     if (!isEdgeLoopCapToolEnabledRef.current) {
       return;
     }
@@ -765,7 +1132,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     const state = getLooseEdgeLoopCapState(edge);
 
     if (!state || !supportsConeLoopMode(state.mode)) {
-      return;
+      return false;
     }
 
     const missingMemberState = members.some(
@@ -773,10 +1140,12 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     );
 
     if (!missingMemberState && state.cone === cone) {
-      return;
+      return false;
     }
 
-    pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+    if (recordHistory) {
+      pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+    }
 
     members.forEach((member) => {
       const existingMemberState = looseEdgeLoopCapStatesRef.current.get(member.key);
@@ -807,9 +1176,10 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       rebuildLooseEdgeLoopCapFill(member.edge, member.key, memberState);
     });
     schedulePersistViewerState();
+    return true;
   };
 
-  const setLooseEdgeLoopCapOffset = (edge: HoveredEdge, offset: number) => {
+  const setLooseEdgeLoopCapOffsetSingle = (edge: HoveredEdge, offset: number) => {
     if (!isEdgeLoopCapToolEnabledRef.current) {
       return;
     }
@@ -893,51 +1263,556 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     schedulePersistViewerState();
   };
 
-  const clearSelectedLooseEdgeLoop = () => {
-    const currentLoop = selectedLooseEdgeLoopRef.current;
-    const overlay = selectedLooseEdgeLoopOverlayRef.current;
+  const removeLoopCapGroupStates = (
+    groups: Array<{ keys: string[]; primaryEdge: HoveredEdge }>,
+  ) => {
+    groups.forEach((group) => {
+      const removedStates = new Set<LooseEdgeLoopCapState>();
 
-    if (overlay) {
-      overlay.parent?.remove(overlay);
-      disposeObject(overlay);
-      selectedLooseEdgeLoopOverlayRef.current = null;
+      group.keys.forEach((key) => {
+        const state = looseEdgeLoopCapStatesRef.current.get(key);
+
+        if (state && !removedStates.has(state)) {
+          removeLooseEdgeLoopCapFill(state);
+          removedStates.add(state);
+        }
+
+        looseEdgeLoopCapStatesRef.current.delete(key);
+      });
+    });
+  };
+
+  const rebuildLoopCapGroupState = (
+    group: { edges: HoveredEdge[]; keys: string[]; primaryEdge: HoveredEdge },
+    state: LooseEdgeLoopCapState,
+  ) => {
+    state.groupLoopKeys = group.keys;
+    state.objectId = group.primaryEdge.objectId;
+    state.sourceMeshUuid = group.primaryEdge.mesh.uuid;
+    rebuildLooseEdgeLoopCapFill(
+      group.primaryEdge,
+      group.keys[0] ?? getLooseEdgeLoopFillKey(group.primaryEdge),
+      state,
+    );
+  };
+
+  const setGroupedLooseEdgeLoopCapMode = (edge: HoveredEdge, mode: LooseEdgeLoopMode) => {
+    const groups = getLoopCapEditGroups(edge);
+    const sourceGroup = groups.find((group) =>
+      group.edges.some((groupEdge) => isSameLooseEdgeLoop(groupEdge, edge)),
+    );
+
+    if (!sourceGroup) {
+      setLooseEdgeLoopCapModeSingle(edge, mode);
+      return false;
     }
 
+    if (mode === "none") {
+      const hadExistingState = groups.some((group) =>
+        group.keys.some((key) => looseEdgeLoopCapStatesRef.current.has(key)),
+      );
+
+      if (!hadExistingState) {
+        return false;
+      }
+
+      pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+      removeLoopCapGroupStates(groups);
+      refreshCapOffsetGizmo(edge);
+      refreshLooseEdgeLoopDisplayColors(edge.mesh.parent ?? rootRef.current);
+      schedulePersistViewerState();
+      return true;
+    }
+
+    const existingState = getLooseEdgeLoopCapState(edge);
+    const existingMode = existingState?.mode;
+    const rememberedNormalAxisTarget =
+      existingState?.normalAxisTarget ??
+      (existingState && isNormalTargetLoopMode(existingState.mode)
+        ? existingState.normalTarget
+        : null);
+    const axisTarget = isNormalTargetLoopMode(mode)
+      ? rememberedNormalAxisTarget
+      : existingMode === mode
+        ? (existingState?.normalTarget ?? null)
+        : null;
+    const sourceAxisData = getLooseEdgeLoopCapAxisDataForEdges(
+      sourceGroup.primaryEdge,
+      sourceGroup.edges,
+      mode,
+      axisTarget,
+    );
+
+    if (!sourceAxisData) {
+      refreshCapOffsetGizmo(edge);
+      return false;
+    }
+
+    const missingState = groups.some((group) =>
+      group.keys.some((key) => !looseEdgeLoopCapStatesRef.current.has(key)),
+    );
+    const changed = !existingState || existingMode !== mode || missingState;
+
+    if (changed) {
+      pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+    }
+
+    const rememberedNormalOffset =
+      isNormalTargetLoopMode(mode) && axisTarget
+        ? axisTarget.distanceTo(sourceAxisData.data.center)
+        : null;
+    const nextOffset =
+      mode === "fill"
+        ? 0
+        : existingMode === mode && existingState && Number.isFinite(existingState.offset)
+          ? existingState.offset
+          : (rememberedNormalOffset ?? sourceAxisData.defaultOffset);
+    const nextCone = supportsConeLoopMode(mode) ? (existingState?.cone ?? false) : false;
+
+    groups.forEach((group) => {
+      const existingGroupState =
+        group.keys.map((key) => looseEdgeLoopCapStatesRef.current.get(key)).find(Boolean) ?? null;
+      const groupAxisTarget =
+        group === sourceGroup
+          ? axisTarget
+          : isNormalTargetLoopMode(mode)
+            ? getMirroredGroupNormalTarget(sourceGroup, group, sourceAxisData.axis, nextOffset)
+            : null;
+      const groupAxisData = getLooseEdgeLoopCapAxisDataForEdges(
+        group.primaryEdge,
+        group.edges,
+        mode,
+        groupAxisTarget,
+      );
+
+      if (!groupAxisData) {
+        return;
+      }
+
+      const groupState = existingGroupState ?? {
+        cone: nextCone,
+        fill: null,
+        mode,
+        normalAxisTarget: null,
+        normalTarget: null,
+        objectId: group.primaryEdge.objectId,
+        occlusionOverlay: null,
+        offset: nextOffset,
+        sourceMeshUuid: group.primaryEdge.mesh.uuid,
+      };
+
+      groupState.cone = nextCone;
+      groupState.mode = mode;
+      groupState.offset = nextOffset;
+      groupState.normalTarget =
+        mode !== "fill" && isNormalTargetLoopMode(mode)
+          ? groupAxisData.data.center.clone().addScaledVector(groupAxisData.axis, nextOffset)
+          : null;
+      groupState.normalAxisTarget =
+        isNormalTargetLoopMode(mode) && groupAxisTarget
+          ? groupAxisTarget.clone()
+          : (groupState.normalTarget?.clone() ?? null);
+      rebuildLoopCapGroupState(group, groupState);
+    });
+    refreshCapOffsetGizmo(edge);
+    refreshLooseEdgeLoopDisplayColors(edge.mesh.parent ?? rootRef.current);
+    schedulePersistViewerState();
+    return changed;
+  };
+
+  const setGroupedLooseEdgeLoopCapCone = (edge: HoveredEdge, cone: boolean) => {
+    const groups = getLoopCapEditGroups(edge);
+    const state = getLooseEdgeLoopCapState(edge);
+
+    if (!state || !supportsConeLoopMode(state.mode)) {
+      return false;
+    }
+
+    const changed =
+      state.cone !== cone ||
+      groups.some((group) => group.keys.some((key) => !looseEdgeLoopCapStatesRef.current.has(key)));
+
+    if (!changed) {
+      return false;
+    }
+
+    pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+
+    groups.forEach((group) => {
+      const groupState =
+        group.keys.map((key) => looseEdgeLoopCapStatesRef.current.get(key)).find(Boolean) ?? null;
+
+      if (!groupState) {
+        return;
+      }
+
+      groupState.cone = cone;
+      rebuildLoopCapGroupState(group, groupState);
+    });
+    schedulePersistViewerState();
+    return true;
+  };
+
+  const setGroupedLooseEdgeLoopCapOffset = (edge: HoveredEdge, offset: number) => {
+    const groups = getLoopCapEditGroups(edge);
+    const sourceGroup = groups.find((group) =>
+      group.edges.some((groupEdge) => isSameLooseEdgeLoop(groupEdge, edge)),
+    );
+    const sourceState = getLooseEdgeLoopCapState(edge);
+
+    if (!sourceGroup || !sourceState || sourceState.mode === "none") {
+      refreshCapOffsetGizmo(edge);
+      return;
+    }
+
+    const nextOffset = offset;
+    const sourceAxisData = getLooseEdgeLoopCapStateAxisData(edge, sourceState);
+
+    groups.forEach((group) => {
+      const groupState =
+        group.keys.map((key) => looseEdgeLoopCapStatesRef.current.get(key)).find(Boolean) ?? null;
+
+      if (!groupState) {
+        return;
+      }
+
+      const groupAxisTarget =
+        group === sourceGroup
+          ? getLoopCapAxisTarget(groupState)
+          : sourceAxisData && isNormalTargetLoopMode(groupState.mode)
+            ? getMirroredGroupNormalTarget(sourceGroup, group, sourceAxisData.axis, nextOffset)
+            : getLoopCapAxisTarget(groupState);
+
+      groupState.offset = nextOffset;
+      if (isNormalTargetLoopMode(groupState.mode)) {
+        const groupAxisData = getLooseEdgeLoopCapAxisDataForEdges(
+          group.primaryEdge,
+          group.edges,
+          groupState.mode,
+          groupAxisTarget,
+        );
+
+        if (groupAxisData) {
+          groupState.normalTarget = groupAxisData.data.center
+            .clone()
+            .addScaledVector(groupAxisData.axis, nextOffset);
+          groupState.normalAxisTarget = groupAxisTarget
+            ? groupAxisTarget.clone()
+            : (groupState.normalAxisTarget ?? groupState.normalTarget.clone());
+        }
+      }
+
+      rebuildLoopCapGroupState(group, groupState);
+    });
+    refreshSelectedLooseEdgeLoopState(edge);
+    schedulePersistViewerState();
+  };
+
+  const setGroupedLooseEdgeLoopCapTarget = (edge: HoveredEdge, target: THREE.Vector3) => {
+    const groups = getLoopCapEditGroups(edge);
+    const sourceGroup = groups.find((group) =>
+      group.edges.some((groupEdge) => isSameLooseEdgeLoop(groupEdge, edge)),
+    );
+    const sourceState = getLooseEdgeLoopCapState(edge);
+    const sourceAxisData =
+      sourceState && sourceGroup
+        ? getLooseEdgeLoopCapAxisDataForEdges(
+            sourceGroup.primaryEdge,
+            sourceGroup.edges,
+            sourceState.mode,
+            target,
+          )
+        : null;
+
+    if (
+      !sourceGroup ||
+      !sourceState ||
+      !sourceAxisData ||
+      !isNormalTargetLoopMode(sourceState.mode)
+    ) {
+      refreshCapOffsetGizmo(edge);
+      return;
+    }
+
+    const nextOffset = target.distanceTo(sourceAxisData.data.center);
+
+    groups.forEach((group) => {
+      const groupState =
+        group.keys.map((key) => looseEdgeLoopCapStatesRef.current.get(key)).find(Boolean) ?? null;
+
+      if (!groupState) {
+        return;
+      }
+
+      const groupTarget =
+        group === sourceGroup
+          ? target
+          : getMirroredGroupNormalTarget(sourceGroup, group, sourceAxisData.axis, nextOffset);
+      const groupAxisData = getLooseEdgeLoopCapAxisDataForEdges(
+        group.primaryEdge,
+        group.edges,
+        groupState.mode,
+        groupTarget,
+      );
+
+      if (!groupAxisData || !groupTarget) {
+        return;
+      }
+
+      groupState.offset = nextOffset;
+      groupState.normalTarget = groupAxisData.data.center
+        .clone()
+        .addScaledVector(groupAxisData.axis, nextOffset);
+      groupState.normalAxisTarget = groupTarget.clone();
+      rebuildLoopCapGroupState(group, groupState);
+    });
+    refreshSelectedLooseEdgeLoopState(edge);
+    schedulePersistViewerState();
+  };
+
+  const editSelectedLooseEdgeLoops = (
+    edge: HoveredEdge,
+    editLoop: (selectedEdge: HoveredEdge, recordHistory: boolean) => boolean | void,
+  ) => {
+    const edges = getEditableLooseEdgeLoops(edge);
+
+    if (edges.length <= 1) {
+      return editLoop(edge, true) === true;
+    }
+
+    const historySnapshot = createCurrentViewerHistorySnapshot();
+    let changed = false;
+
+    edges.forEach((selectedEdge) => {
+      changed = editLoop(selectedEdge, false) === true || changed;
+    });
+
+    if (changed) {
+      pushViewerHistorySnapshot(historySnapshot);
+    }
+
+    return changed;
+  };
+
+  const setLooseEdgeLoopCapMode = (edge: HoveredEdge, mode: LooseEdgeLoopMode) => {
+    if (getEditableLooseEdgeLoops(edge).length > 1) {
+      const changed = setGroupedLooseEdgeLoopCapMode(edge, mode);
+
+      if (changed) {
+        refreshSelectedLooseEdgeLoopState(edge);
+      }
+      return;
+    }
+
+    const changed = editSelectedLooseEdgeLoops(edge, (selectedEdge, recordHistory) =>
+      setLooseEdgeLoopCapModeSingle(selectedEdge, mode, recordHistory),
+    );
+
+    if (changed) {
+      refreshSelectedLooseEdgeLoopState(edge);
+    }
+  };
+
+  const setLooseEdgeLoopCapCone = (edge: HoveredEdge, cone: boolean) => {
+    if (getEditableLooseEdgeLoops(edge).length > 1) {
+      const changed = setGroupedLooseEdgeLoopCapCone(edge, cone);
+
+      if (changed) {
+        refreshSelectedLooseEdgeLoopState(edge);
+      }
+      return;
+    }
+
+    const changed = editSelectedLooseEdgeLoops(edge, (selectedEdge, recordHistory) =>
+      setLooseEdgeLoopCapConeSingle(selectedEdge, cone, recordHistory),
+    );
+
+    if (changed) {
+      refreshSelectedLooseEdgeLoopState(edge);
+    }
+  };
+
+  const setLooseEdgeLoopCapOffset = (edge: HoveredEdge, offset: number) => {
+    if (getEditableLooseEdgeLoops(edge).length > 1) {
+      setGroupedLooseEdgeLoopCapOffset(edge, offset);
+      return;
+    }
+
+    const sourceState = getLooseEdgeLoopCapState(edge);
+    const offsetDelta = sourceState ? offset - sourceState.offset : 0;
+
+    getEditableLooseEdgeLoops(edge).forEach((selectedEdge) => {
+      if (isSameLooseEdgeLoop(selectedEdge, edge)) {
+        setLooseEdgeLoopCapOffsetSingle(selectedEdge, offset);
+        return;
+      }
+
+      const selectedState = getLooseEdgeLoopCapState(selectedEdge);
+      const selectedOffset = selectedState ? selectedState.offset + offsetDelta : offset;
+
+      setLooseEdgeLoopCapOffsetSingle(selectedEdge, selectedOffset);
+    });
+    refreshSelectedLooseEdgeLoopState(edge);
+  };
+
+  const setLooseEdgeLoopCapTarget = (edge: HoveredEdge, target: THREE.Vector3) => {
+    if (getEditableLooseEdgeLoops(edge).length > 1) {
+      setGroupedLooseEdgeLoopCapTarget(edge, target);
+      return;
+    }
+
+    const sourceState = getLooseEdgeLoopCapState(edge);
+    const sourceTarget = sourceState?.normalTarget ?? null;
+    const targetDelta = sourceTarget ? target.clone().sub(sourceTarget) : new THREE.Vector3();
+
+    getEditableLooseEdgeLoops(edge).forEach((selectedEdge) => {
+      if (isSameLooseEdgeLoop(selectedEdge, edge)) {
+        setLooseEdgeLoopCapTargetSingle(selectedEdge, target);
+        return;
+      }
+
+      const selectedState = getLooseEdgeLoopCapState(selectedEdge);
+
+      if (!selectedState?.normalTarget) {
+        setLooseEdgeLoopCapTargetSingle(selectedEdge, target);
+        return;
+      }
+
+      setLooseEdgeLoopCapTargetSingle(
+        selectedEdge,
+        selectedState.normalTarget.clone().add(targetDelta),
+      );
+    });
+    refreshSelectedLooseEdgeLoopState(edge);
+  };
+
+  const handleRemoveSelectedLooseEdgeLoop = () => {
+    if (!isEdgeLoopCapToolEnabledRef.current) {
+      return;
+    }
+
+    const edge = selectedLooseEdgeLoopRef.current;
+    const modelRoot = rootRef.current;
+
+    if (!edge || !modelRoot) {
+      return;
+    }
+
+    const selectedEdges = getEditableLooseEdgeLoops(edge);
+    const cutEdgeIdsByMesh = getCutEdgeIdsByMeshForLoops(selectedEdges);
+
+    if (!Array.from(cutEdgeIdsByMesh.values()).some((edgeIds) => edgeIds.size > 0)) {
+      setSelectedLooseEdgeLoopRemovable(false);
+      return;
+    }
+
+    const historySnapshot = createCurrentViewerHistorySnapshot();
+    const joinObjectIds = getLoopJoinObjectIds(selectedEdges);
+    const affectedMeshes = getMeshesForObjectIds(modelRoot, joinObjectIds);
+    const joinPlan =
+      joinObjectIds.size > 1
+        ? createSelectedObjectJoinPlan(modelRoot, joinObjectIds, edge.objectId)
+        : null;
+    let changed = false;
+
+    cutEdgeIdsByMesh.forEach((edgeIds, mesh) => {
+      affectedMeshes.add(mesh);
+      changed = Boolean(setEdgesCut(mesh, edgeIds, false)) || changed;
+    });
+
+    if (joinPlan) {
+      changed = applySelectedObjectJoinPlan(modelRoot, joinPlan) || changed;
+      joinPlan.objectIdToTargetId.forEach((_targetObjectId, sourceObjectId) => {
+        hiddenObjectIdsRef.current.delete(sourceObjectId);
+        delete objectNamesRef.current[sourceObjectId];
+      });
+    }
+
+    if (!changed) {
+      setSelectedLooseEdgeLoopRemovable(false);
+      return;
+    }
+
+    pushViewerHistorySnapshot(historySnapshot);
+    removeLoopCapGroupStates(getLoopCapEditGroups(edge));
+    clearSelectedLooseEdgeLoop();
+    applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
+    refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+    refreshViewportObjectOutlines(modelRoot, hiddenObjectIdsRef.current);
+    affectedMeshes.forEach((mesh) => {
+      refreshLooseEdgeOverlay(mesh, hiddenObjectIdsRef.current, selectedObjectIdRef.current, true);
+    });
+    syncLooseEdgeLoopCapStates(modelRoot);
+    refreshLooseEdgeLoopDisplayColors(modelRoot);
+    refreshSeparatedObjectList(modelRoot);
+    schedulePersistViewerState();
+  };
+
+  const clearSelectedLooseEdgeLoop = () => {
+    const currentLoop = selectedLooseEdgeLoopRef.current;
+
+    selectedLooseEdgeLoopOverlayRef.current.forEach((overlay) => {
+      overlay.parent?.remove(overlay);
+      disposeObject(overlay);
+    });
+    selectedLooseEdgeLoopOverlayRef.current.clear();
+
     removeCapOffsetGizmo();
+    selectedLooseEdgeLoopsRef.current = [];
     selectedLooseEdgeLoopRef.current = null;
     setSelectedLooseEdgeLoopActive(false);
+    setSelectedLooseEdgeLoopRemovable(false);
+    setLooseEdgeLoopMode("none");
+    setLooseEdgeLoopCone(false);
     refreshLooseEdgeLoopCapVisibility();
     refreshViewportObjectOutlines(currentLoop?.mesh.parent ?? rootRef.current);
     refreshLooseEdgeLoopDisplayColors(currentLoop?.mesh.parent ?? rootRef.current);
   };
 
-  const selectLooseEdgeLoop = (edge: HoveredEdge) => {
+  const selectLooseEdgeLoop = (edge: HoveredEdge, additive = false) => {
     if (!isEdgeLoopCapToolEnabledRef.current) {
       return;
     }
 
-    const modelRoot = rootRef.current;
+    const currentSelection = selectedLooseEdgeLoopsRef.current;
+    const existingIndex = currentSelection.findIndex((selectedLoop) =>
+      isSameLooseEdgeLoop(selectedLoop, edge),
+    );
+    const hasSelectionInDifferentMesh = currentSelection.some(
+      (selectedLoop) => selectedLoop.mesh !== edge.mesh,
+    );
 
-    clearSelectedLooseEdgeLoop();
-    clearLinkedFaceSelectionHandlerRef.current?.(true, true);
-    clearHoverEdgeOverlay(edge);
-    selectedLooseEdgeLoopRef.current = edge;
-    setLooseEdgeLoopMode(getLooseEdgeLoopCapMode(edge));
-    setLooseEdgeLoopCone(getLooseEdgeLoopCapCone(edge));
-    setSelectedLooseEdgeLoopActive(true);
-    refreshLooseEdgeLoopCapVisibility();
-    refreshViewportObjectOutlines(edge.mesh.parent ?? modelRoot);
-    setLooseEdgeLoopColor(edge.mesh, edge.loopId, selectedLooseEdgeLoopColor);
-
-    const overlay = createLooseEdgeLoopOverlay(edge, selectedLooseEdgeLoopColor);
-
-    if (!overlay) {
+    if (!additive || hasSelectionInDifferentMesh) {
+      clearSelectedLooseEdgeLoop();
+      clearLinkedFaceSelectionHandlerRef.current?.(true, true);
+      selectedLooseEdgeLoopsRef.current = [edge];
+      clearHoverEdgeOverlay(edge);
+      addSelectedLooseEdgeLoopOverlay(edge);
+      refreshSelectedLooseEdgeLoopState(edge);
       return;
     }
 
-    (edge.mesh.parent ?? modelRoot)?.add(overlay);
-    selectedLooseEdgeLoopOverlayRef.current = overlay;
-    refreshCapOffsetGizmo(edge);
+    clearLinkedFaceSelectionHandlerRef.current?.(true, true);
+    clearHoverEdgeOverlay(edge);
+
+    if (existingIndex >= 0) {
+      removeSelectedLooseEdgeLoopOverlay(edge);
+      selectedLooseEdgeLoopsRef.current = currentSelection.filter(
+        (selectedLoop) => !isSameLooseEdgeLoop(selectedLoop, edge),
+      );
+
+      if (selectedLooseEdgeLoopsRef.current.length === 0) {
+        clearSelectedLooseEdgeLoop();
+        return;
+      }
+
+      refreshSelectedLooseEdgeLoopState();
+      return;
+    }
+
+    selectedLooseEdgeLoopsRef.current = [...currentSelection, edge];
+    addSelectedLooseEdgeLoopOverlay(edge);
+    refreshSelectedLooseEdgeLoopState(edge);
   };
 
   const handleLooseEdgeLoopModeChange = (mode: LooseEdgeLoopMode) => {
@@ -977,6 +1852,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     getLooseEdgeLoopCapState,
     handleLooseEdgeLoopConeChange,
     handleLooseEdgeLoopModeChange,
+    handleRemoveSelectedLooseEdgeLoop,
     refreshCapOffsetGizmo,
     refreshLooseEdgeLoopCapVisibility,
     removeCapOffsetGizmo,

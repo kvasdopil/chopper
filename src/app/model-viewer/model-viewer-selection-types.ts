@@ -44,7 +44,7 @@ export type ModelViewerSelectionParams = {
   selectionBoundaryLoopOverlayRef: MutableRef<LineSegments2 | null>;
   linkedFaceSelectionThresholdRef: MutableRef<number>;
   rememberedTriangleSelectionRef: MutableRef<RememberedTriangleSelection | null>;
-  selectedLooseEdgeLoopRef: MutableRef<HoveredEdge | null>;
+  selectedLooseEdgeLoopsRef: MutableRef<HoveredEdge[]>;
   hiddenObjectIdsRef: MutableRef<Set<number>>;
   textureVisibleRef: MutableRef<boolean>;
   objectNamesRef: MutableRef<ObjectNameMap>;
