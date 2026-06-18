@@ -32,6 +32,7 @@ import {
   createSelectedObjectStencilMaterial,
   refreshMeshObjectMaterialGroups,
 } from "./materials";
+import { ensureMeshEditState } from "./mesh-edit-state";
 import { refreshLooseEdgeOverlay } from "./loose-edge-geometry";
 
 export function styleModel(model: THREE.Object3D) {
@@ -78,6 +79,7 @@ export function styleModel(model: THREE.Object3D) {
     mesh.userData.sourceTextureMaps = sourceTextureMaps;
     mesh.userData.textureVisible = false;
     mesh.geometry = geometry;
+    ensureMeshEditState(mesh);
 
     disposeMaterial(mesh.material);
 

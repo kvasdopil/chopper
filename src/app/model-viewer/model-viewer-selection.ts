@@ -2,11 +2,11 @@ import * as THREE from "three";
 
 import {
   cameraNearPlane,
-  separationProgressCheckInterval,
   applyLinkedFaceSelectionColors,
   applyObjectColors,
   applySelectedObjectJoinPlan,
   applyViewerHistoryMeshStates,
+  assignFacesToPart,
   buildLinkedFaceSelection,
   buildLinkedFaceSelectionCache,
   buildSelectionBoundaryLoops,
@@ -479,7 +479,10 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       threshold: linkedFaceSelectionThresholdRef.current,
     });
 
-    const hadInvalidMeshState = applyViewerHistoryMeshStates(modelRoot, snapshot.meshes);
+    const hadInvalidMeshState =
+      snapshot.meshStateIncluded === false
+        ? false
+        : applyViewerHistoryMeshStates(modelRoot, snapshot.meshes);
 
     hiddenObjectIdsRef.current = new Set(snapshot.hiddenObjectIds);
     objectNamesRef.current = { ...snapshot.objectNames };
@@ -700,9 +703,10 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     const selection = linkedFaceSelectionRef.current;
     const currentSelectedObjectId = selectedObjectIdRef.current;
     const selectedLooseEdgeLoop = selectedLooseEdgeLoopRef.current;
+    const previousHiddenObjectIds = hiddenObjectIdsRef.current;
     const visibilityChanged =
-      nextHiddenObjectIds.size !== hiddenObjectIdsRef.current.size ||
-      Array.from(nextHiddenObjectIds).some((objectId) => !hiddenObjectIdsRef.current.has(objectId));
+      nextHiddenObjectIds.size !== previousHiddenObjectIds.size ||
+      Array.from(nextHiddenObjectIds).some((objectId) => !previousHiddenObjectIds.has(objectId));
     const nextSelectedObjectIds = new Set(
       Array.from(selectedObjectIdsRef.current).filter(
         (objectId) => !nextHiddenObjectIds.has(objectId),
@@ -710,7 +714,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
     );
 
     if (recordHistory && visibilityChanged) {
-      pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
+      pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot({ includeMeshes: false }));
     }
 
     hiddenObjectIdsRef.current = nextHiddenObjectIds;
@@ -731,8 +735,6 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       clearLinkedFaceSelection();
     } else if (selection) {
       applyLinkedFaceSelectionVisuals(selection);
-    } else if (modelRoot) {
-      applyObjectColors(modelRoot, nextHiddenObjectIds);
     }
 
     if (currentSelectedObjectId != null && nextHiddenObjectIds.has(currentSelectedObjectId)) {
@@ -758,8 +760,11 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
       refreshViewportObjectOutlines(modelRoot, nextHiddenObjectIds);
       refreshLooseEdgeOverlays(modelRoot, nextHiddenObjectIds, selectedObjectIdRef.current, false);
       refreshLooseEdgeLoopDisplayColors(modelRoot);
-      setSeparatedObjects(
-        collectSeparatedObjects(modelRoot, nextHiddenObjectIds, objectNamesRef.current),
+      setSeparatedObjects((currentObjects) =>
+        currentObjects.map((object) => ({
+          ...object,
+          visible: !nextHiddenObjectIds.has(object.id),
+        })),
       );
     } else {
       setSeparatedObjects([]);
@@ -970,14 +975,7 @@ export function useModelViewerSelection(params: ModelViewerSelectionParams) {
 
       pushViewerHistorySnapshot(createCurrentViewerHistorySnapshot());
       nextSeparatedObjectIdRef.current += 1;
-
-      for (let index = 0; index < selectedTriangleIndexes.length; index += 1) {
-        objectIds[selectedTriangleIndexes[index]] = nextObjectId;
-
-        if (index > 0 && index % separationProgressCheckInterval === 0) {
-          await reportProgress(`Assigning faces: ${index}/${selectedTriangleIndexes.length}`);
-        }
-      }
+      assignFacesToPart(selection.mesh, selectedTriangleIndexes, nextObjectId);
 
       await separateLooseObjectPartsAsync(
         selection.topology,

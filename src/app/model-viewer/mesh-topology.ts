@@ -10,7 +10,6 @@ import {
   getTriangleObjectIds,
   getVertexKey,
   getVertexPositionKey,
-  refreshTriangleObjectIdAttribute,
   type MeshTopology,
   type SeparationProgressReporter,
   type TriangleEdgeFace,
@@ -18,6 +17,12 @@ import {
   type TriangleVertex,
   type ObjectJoinPlan,
 } from "./model-viewer-shared";
+import {
+  ensureMeshEditState,
+  markMeshPartIdsChanged,
+  rebuildMeshEditState,
+  setEdgesCut,
+} from "./mesh-edit-state";
 
 export function colorTriangle(
   color: THREE.BufferAttribute,
@@ -86,23 +91,23 @@ export function getTriangleEdgeFace(vertices: TriangleVertex[], edgeKey: string)
 
 export function buildMeshTopology(mesh: THREE.Mesh) {
   const position = mesh.geometry.getAttribute("position");
+  const editState = ensureMeshEditState(mesh);
 
-  if (!(position instanceof THREE.BufferAttribute)) {
+  if (!(position instanceof THREE.BufferAttribute) || !editState) {
     return null;
   }
 
   const edgeToTriangles = new Map<string, number[]>();
   const triangles: TriangleTopology[] = [];
 
-  for (let startIndex = 0; startIndex < position.count; startIndex += 3) {
-    const vertices = getTriangleVertices(position, startIndex);
+  editState.faces.forEach((face, triangleIndex) => {
+    const vertices = getTriangleVertices(position, triangleIndex * 3);
 
     if (!vertices) {
-      continue;
+      return;
     }
 
-    const edgeKeys = getTriangleEdgeKeys(vertices);
-    const triangleIndex = triangles.length;
+    const edgeKeys = [...face.edgeKeys];
 
     triangles.push({ edgeKeys, vertices });
     edgeKeys.forEach((edgeKey) => {
@@ -114,9 +119,12 @@ export function buildMeshTopology(mesh: THREE.Mesh) {
         edgeToTriangles.set(edgeKey, [triangleIndex]);
       }
     });
-  }
+  });
 
   const topology: MeshTopology = {
+    edgeCut: editState.edgeCut,
+    edgeIdByKey: editState.edgeIdByKey,
+    edgeNormalAngles: new Float32Array(editState.edges.map((edge) => edge.normalAngle)),
     edgeToTriangles,
     mesh,
     position,
@@ -132,10 +140,24 @@ export function getTopologyEdgeNormalAngle(
   objectIds: Uint32Array | null = null,
   objectId = defaultObjectId,
 ) {
+  const edgeId = topology.edgeIdByKey?.get(edgeKey);
+  const edgeNormalAngles = topology.edgeNormalAngles;
+  const edgeTriangleIndexes = topology.edgeToTriangles.get(edgeKey) ?? [];
+  const canUseCachedAngle =
+    edgeId != null &&
+    edgeNormalAngles != null &&
+    (!objectIds ||
+      edgeTriangleIndexes.every(
+        (edgeTriangleIndex) => (objectIds[edgeTriangleIndex] ?? defaultObjectId) === objectId,
+      ));
+
+  if (canUseCachedAngle && edgeId != null && edgeNormalAngles != null) {
+    return edgeNormalAngles[edgeId] ?? 90;
+  }
+
   const faces =
-    topology.edgeToTriangles
-      .get(edgeKey)
-      ?.map((edgeTriangleIndex) => {
+    edgeTriangleIndexes
+      .map((edgeTriangleIndex) => {
         if (objectIds && objectIds[edgeTriangleIndex] !== objectId) {
           return null;
         }
@@ -193,6 +215,12 @@ async function getObjectConnectedComponentsAsync(
       visitedTriangles += 1;
 
       triangle.edgeKeys.forEach((edgeKey) => {
+        const edgeId = topology.edgeIdByKey?.get(edgeKey);
+
+        if (edgeId != null && topology.edgeCut?.[edgeId] === 1) {
+          return;
+        }
+
         topology.edgeToTriangles.get(edgeKey)?.forEach((edgeTriangleIndex) => {
           if (
             edgeTriangleIndex === triangleIndex ||
@@ -225,6 +253,8 @@ export async function separateLooseObjectPartsAsync(
   getNextObjectId: () => number,
   onProgress: SeparationProgressReporter,
 ) {
+  let changed = false;
+
   for (const objectId of new Set(objectIdsToScan)) {
     await onProgress(`Finding loose parts in object ${objectId}`);
 
@@ -254,6 +284,7 @@ export async function separateLooseObjectPartsAsync(
 
       for (let index = 0; index < component.length; index += 1) {
         objectIds[component[index]] = nextObjectId;
+        changed = true;
 
         if (index > 0 && index % separationProgressCheckInterval === 0) {
           await onProgress(
@@ -262,6 +293,10 @@ export async function separateLooseObjectPartsAsync(
         }
       }
     }
+  }
+
+  if (changed) {
+    markMeshPartIdsChanged(topology.mesh);
   }
 }
 
@@ -434,9 +469,10 @@ export function applySelectedObjectJoinPlan(modelRoot: THREE.Object3D, plan: Obj
       });
     }
 
+    const seamPositionEdgeKeys = new Set<string>();
     const seamVertexIndexes = new Set<number>();
 
-    edgeRefsByPositionEdgeKey.forEach((edgeRefs) => {
+    edgeRefsByPositionEdgeKey.forEach((edgeRefs, positionEdgeKey) => {
       const originalObjectIds = new Set(edgeRefs.map((edgeRef) => edgeRef.objectId));
       const targetObjectIds = new Set(
         edgeRefs.map(
@@ -448,6 +484,7 @@ export function applySelectedObjectJoinPlan(modelRoot: THREE.Object3D, plan: Obj
         return;
       }
 
+      seamPositionEdgeKeys.add(positionEdgeKey);
       edgeRefs.forEach((edgeRef) => {
         seamVertexIndexes.add(edgeRef.vertexIndexes[0]);
         seamVertexIndexes.add(edgeRef.vertexIndexes[1]);
@@ -478,16 +515,29 @@ export function applySelectedObjectJoinPlan(modelRoot: THREE.Object3D, plan: Obj
         topologyIds[vertexIndex] = 0;
         meshChanged = true;
       });
+
+      if (meshChanged) {
+        rebuildMeshEditState(mesh);
+      }
+    }
+
+    if (seamPositionEdgeKeys.size > 0) {
+      const editState = ensureMeshEditState(mesh);
+      const seamEdgeIds =
+        editState?.edges
+          .filter((edge) => seamPositionEdgeKeys.has(edge.positionEdgeKey))
+          .map((edge) => edge.id) ?? [];
+
+      if (setEdgesCut(mesh, seamEdgeIds, false)) {
+        meshChanged = true;
+      }
     }
 
     if (!meshChanged) {
       return;
     }
 
-    refreshTriangleObjectIdAttribute(mesh);
-    mesh.geometry.computeVertexNormals();
-    mesh.geometry.computeBoundingBox();
-    mesh.geometry.computeBoundingSphere();
+    markMeshPartIdsChanged(mesh);
     changed = true;
   });
 

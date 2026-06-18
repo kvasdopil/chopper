@@ -36,6 +36,12 @@ import type { PersistedLoopCapState } from "./persistence";
 import type { LooseEdgeLoopMode } from "../viewer-controls/types";
 import type { ModelViewerLoopCapsParams } from "./model-viewer-loop-caps-types";
 
+function getLoopCapAxisTarget(state: LooseEdgeLoopCapState) {
+  return isNormalTargetLoopMode(state.mode)
+    ? (state.normalAxisTarget ?? state.normalTarget)
+    : state.normalTarget;
+}
+
 export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
   const {
     rootRef,
@@ -216,7 +222,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     const key = getLooseEdgeLoopFillKey(edge);
     const state = getLooseEdgeLoopCapState(edge);
     const axisData = state
-      ? getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget)
+      ? getLooseEdgeLoopCapAxisData(edge, state.mode, getLoopCapAxisTarget(state))
       : null;
     const parent = edge.mesh.parent ?? modelRoot;
 
@@ -233,54 +239,41 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     }
 
     if (isNormalTargetLoopMode(state.mode)) {
-      const gizmo = capOffsetGizmoRef.current;
-
-      if (gizmo) {
-        gizmo.parent?.remove(gizmo);
-        disposeObject(gizmo);
-        capOffsetGizmoRef.current = null;
-        capOffsetGizmoHandleRef.current = null;
-      }
-
       const transformControls = capNormalTransformControlsRef.current;
       const transformHelper = capNormalTransformHelperRef.current;
       const transformTarget = capNormalTargetRef.current;
 
-      if (!transformControls || !transformHelper || !transformTarget) {
-        return;
+      if (transformControls && transformHelper && transformTarget) {
+        edge.mesh.updateMatrixWorld(true);
+        transformTarget.position.copy(
+          edge.mesh.localToWorld(
+            axisData.data.center.clone().addScaledVector(axisData.axis, state.offset),
+          ),
+        );
+        transformTarget.visible = true;
+        transformControls.setMode("translate");
+        transformControls.setSpace("world");
+        transformControls.setSize(0.7);
+        transformControls.showX = true;
+        transformControls.showY = true;
+        transformControls.showZ = true;
+        transformControls.showXY = false;
+        transformControls.showYZ = false;
+        transformControls.showXZ = false;
+        transformControls.attach(transformTarget);
+        transformControls.enabled = true;
+        transformHelper.visible = true;
+      }
+    } else {
+      capNormalTransformControlsRef.current?.detach();
+
+      if (capNormalTransformHelperRef.current) {
+        capNormalTransformHelperRef.current.visible = false;
       }
 
-      edge.mesh.updateMatrixWorld(true);
-      transformTarget.position.copy(
-        edge.mesh.localToWorld(
-          axisData.data.center.clone().addScaledVector(axisData.axis, state.offset),
-        ),
-      );
-      transformTarget.visible = true;
-      transformControls.setMode("translate");
-      transformControls.setSpace("world");
-      transformControls.setSize(0.7);
-      transformControls.showX = true;
-      transformControls.showY = true;
-      transformControls.showZ = true;
-      transformControls.showXY = false;
-      transformControls.showYZ = false;
-      transformControls.showXZ = false;
-      transformControls.attach(transformTarget);
-      transformControls.enabled = true;
-      transformHelper.visible = true;
-
-      return;
-    }
-
-    capNormalTransformControlsRef.current?.detach();
-
-    if (capNormalTransformHelperRef.current) {
-      capNormalTransformHelperRef.current.visible = false;
-    }
-
-    if (capNormalTargetRef.current) {
-      capNormalTargetRef.current.visible = false;
+      if (capNormalTargetRef.current) {
+        capNormalTargetRef.current.visible = false;
+      }
     }
 
     let gizmo = capOffsetGizmoRef.current;
@@ -378,7 +371,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     key: string,
     state: LooseEdgeLoopCapState,
   ) => {
-    const axisData = getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget);
+    const axisData = getLooseEdgeLoopCapAxisData(edge, state.mode, getLoopCapAxisTarget(state));
 
     if (!axisData) {
       return;
@@ -389,27 +382,30 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     }
 
     if (isNormalTargetLoopMode(state.mode)) {
-      if (state.normalTarget) {
-        state.offset = state.normalTarget.distanceTo(axisData.data.center);
-      } else {
-        state.offset = clampLooseEdgeLoopCapOffset(
-          edge,
-          state.mode,
-          state.offset,
-          state.normalTarget,
-        );
-        state.normalTarget = axisData.data.center
-          .clone()
-          .addScaledVector(axisData.axis, Math.max(Math.abs(state.offset), 0.001));
+      state.offset = clampLooseEdgeLoopCapOffset(
+        edge,
+        state.mode,
+        state.offset,
+        getLoopCapAxisTarget(state),
+      );
+
+      if (!state.normalAxisTarget) {
+        state.normalAxisTarget = state.normalTarget
+          ? state.normalTarget.clone()
+          : axisData.data.center
+              .clone()
+              .addScaledVector(axisData.axis, Math.max(Math.abs(state.offset), 0.001));
       }
 
-      state.normalAxisTarget = state.normalTarget.clone();
+      state.normalTarget = axisData.data.center
+        .clone()
+        .addScaledVector(axisData.axis, state.offset);
     } else {
       state.offset = clampLooseEdgeLoopCapOffset(
         edge,
         state.mode,
         state.offset,
-        state.normalTarget,
+        getLoopCapAxisTarget(state),
       );
     }
 
@@ -417,7 +413,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       edge,
       state.mode,
       state.offset,
-      state.normalTarget,
+      getLoopCapAxisTarget(state),
       state.cone,
     );
     const parent = edge.mesh.parent ?? rootRef.current;
@@ -482,8 +478,9 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
         : isNormalTargetLoopMode(capState.mode) && normalTarget
           ? normalTarget.clone()
           : null;
-      const axisTarget =
-        isNormalTargetLoopMode(capState.mode) && !normalTarget ? normalAxisTarget : normalTarget;
+      const axisTarget = isNormalTargetLoopMode(capState.mode)
+        ? (normalAxisTarget ?? normalTarget)
+        : normalTarget;
       const axisData = getLooseEdgeLoopCapAxisData(edge, capState.mode, axisTarget);
 
       if (!axisData) {
@@ -496,25 +493,27 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
         fill: null,
         mode: capState.mode,
         normalAxisTarget,
-        normalTarget: axisTarget,
+        normalTarget,
         objectId: edge.objectId,
         occlusionOverlay: null,
         offset: capState.mode === "fill" ? 0 : capState.offset,
         sourceMeshUuid: mesh.uuid,
       };
 
-      state.offset = clampLooseEdgeLoopCapOffset(
-        edge,
-        state.mode,
-        state.offset,
-        state.normalTarget,
-      );
+      state.offset = clampLooseEdgeLoopCapOffset(edge, state.mode, state.offset, axisTarget);
 
       if (isNormalTargetLoopMode(state.mode) && !state.normalTarget) {
         state.normalTarget = axisData.data.center
           .clone()
           .addScaledVector(axisData.axis, state.offset);
-        state.normalAxisTarget = state.normalTarget.clone();
+      }
+
+      if (isNormalTargetLoopMode(state.mode) && !state.normalAxisTarget) {
+        state.normalAxisTarget = state.normalTarget
+          ? state.normalTarget.clone()
+          : axisData.data.center
+              .clone()
+              .addScaledVector(axisData.axis, Math.max(Math.abs(state.offset), 0.001));
       }
 
       rebuildLooseEdgeLoopCapFill(edge, key, state);
@@ -548,6 +547,10 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     const requestedOffset = target.distanceTo(axisData.data.center);
     const nextOffset = requestedOffset;
     const nextTarget = target.clone();
+    const nextAxisTarget =
+      requestedOffset > 0.001
+        ? nextTarget.clone()
+        : axisData.data.center.clone().addScaledVector(axisData.axis, 0.001);
     const missingMemberState = members.some(
       (member) => !looseEdgeLoopCapStatesRef.current.has(member.key),
     );
@@ -558,7 +561,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       state.normalTarget &&
       state.normalAxisTarget &&
       nextTarget.distanceToSquared(state.normalTarget) < 0.000001 &&
-      nextTarget.distanceToSquared(state.normalAxisTarget) < 0.000001
+      nextAxisTarget.distanceToSquared(state.normalAxisTarget) < 0.000001
     ) {
       return;
     }
@@ -584,14 +587,14 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       memberState.normalTarget = isSameLooseEdgeLoop(member.edge, edge)
         ? nextTarget.clone()
         : getMirroredLoopNormalTarget(edge, member.edge, axisData.axis, nextOffset);
-      memberState.normalAxisTarget = memberState.normalTarget
-        ? memberState.normalTarget.clone()
-        : null;
+      memberState.normalAxisTarget = isSameLooseEdgeLoop(member.edge, edge)
+        ? nextAxisTarget.clone()
+        : memberState.normalTarget
+          ? memberState.normalTarget.clone()
+          : null;
       rebuildLooseEdgeLoopCapFill(member.edge, member.key, memberState);
     });
-    if (capNormalTransformControlsRef.current?.dragging !== true) {
-      refreshCapOffsetGizmo(edge);
-    }
+    refreshCapOffsetGizmo(edge);
     schedulePersistViewerState();
   };
 
@@ -819,7 +822,8 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       return;
     }
 
-    const nextOffset = clampLooseEdgeLoopCapOffset(edge, state.mode, offset, state.normalTarget);
+    const axisTarget = getLoopCapAxisTarget(state);
+    const nextOffset = clampLooseEdgeLoopCapOffset(edge, state.mode, offset, axisTarget);
     const missingMemberState = members.some(
       (member) => !looseEdgeLoopCapStatesRef.current.has(member.key),
     );
@@ -832,15 +836,17 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       state.mode !== "fill" &&
       (members.length > 1 || isNormalTargetLoopMode(state.mode) || Boolean(state.normalTarget));
     const selectedAxisData = shouldStoreAxisTarget
-      ? getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget)
+      ? getLooseEdgeLoopCapAxisData(edge, state.mode, axisTarget)
       : null;
     const selectedTarget = selectedAxisData
       ? selectedAxisData.data.center.clone().addScaledVector(selectedAxisData.axis, nextOffset)
       : null;
     const selectedAxisTarget = selectedAxisData
-      ? selectedAxisData.data.center
-          .clone()
-          .addScaledVector(selectedAxisData.axis, Math.max(Math.abs(nextOffset), 0.001))
+      ? isNormalTargetLoopMode(state.mode) && axisTarget
+        ? axisTarget.clone()
+        : selectedAxisData.data.center
+            .clone()
+            .addScaledVector(selectedAxisData.axis, Math.max(Math.abs(nextOffset), 0.001))
       : null;
 
     members.forEach((member) => {
@@ -872,9 +878,13 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
               : getMirroredLoopNormalTarget(edge, member.edge, selectedAxisData.axis, nextOffset)
           : null;
       if (isNormalTargetLoopMode(state.mode)) {
-        memberState.normalAxisTarget = memberState.normalTarget
-          ? memberState.normalTarget.clone()
-          : null;
+        if (isSameLooseEdgeLoop(member.edge, edge)) {
+          memberState.normalAxisTarget = selectedAxisTarget
+            ? selectedAxisTarget.clone()
+            : (memberState.normalAxisTarget ?? memberState.normalTarget?.clone() ?? null);
+        } else if (!memberState.normalAxisTarget && memberState.normalTarget) {
+          memberState.normalAxisTarget = memberState.normalTarget.clone();
+        }
       }
 
       rebuildLooseEdgeLoopCapFill(member.edge, member.key, memberState);

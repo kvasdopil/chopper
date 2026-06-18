@@ -45,6 +45,7 @@ Related documents:
 - Existing loose-edge contact spans are not hoverable while separation mode is active.
 - Hovering a separable boundary loop highlights the whole loop in blue.
 - Clicking a hovered boundary loop cuts through that boundary without moving visible vertices or assigning the whole selected mask to a new object.
+- Boundary-loop cuts are represented as edge-cut metadata over the source mesh; they affect topology traversal and loose-edge discovery without changing triangle positions.
 - After a boundary-loop cut, object colors and the object list refresh immediately. The linked-face selection is rebuilt from the same seed triangle when possible so additional boundary loops can be clicked without reselecting the face region.
 - When the linked-face selection is rebuilt after a boundary-loop cut, the stable threshold-gradient fill is restored from the rebuilt cache.
 - After a boundary cut, separable loose components created by the cut become independent objects according to the loose-component rules.

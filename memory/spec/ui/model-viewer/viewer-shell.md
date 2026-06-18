@@ -24,6 +24,7 @@ Related documents:
 
 - A browser refresh restores the active GLB and durable user edits when a restorable model exists.
 - Durable edits include separated object membership, object names, hidden-object state, topology cuts, edited mesh positions, and edge-loop generation choices.
+- Editable object separation and topology cuts are restored as metadata over source faces and edges; generated loop geometry is rebuilt from that metadata rather than treated as source geometry.
 - Local refresh persistence uses the same editor metadata payload as exported playground GLBs for object names, hidden-object state, next object id, and edge-loop generation choices, plus local mesh deltas for per-triangle membership, topology cuts, and edited positions.
 - Runtime-only viewport state is not restored. This includes camera position, viewport focus, hover state, selected items, in-progress separation state, progress text, and active adjustment handles.
 - Camera projection mode is runtime-only viewport state and is not restored after refresh.

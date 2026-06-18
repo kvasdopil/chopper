@@ -17,6 +17,7 @@ Related documents:
 - A newly loaded model starts with a default object labeled `Default` unless the object is renamed.
 - Object names may be edited inline from the object list.
 - Clearing an inline object name removes the custom name and restores the generated default label.
+- Object rows show a red bullet before the triangle count when that object has at least one unclosed loose-edge loop.
 - Object names participate in refresh restore, undo, and export.
 
 ## Automatic Naming
@@ -57,6 +58,7 @@ Related documents:
 
 - The eye control toggles object visibility.
 - Hidden objects do not render faces, outlines, loose-edge lines, generated edge-loop geometry, or participate in pointer picking.
+- Visibility toggles update material display state and object-list visibility metadata without rebuilding mesh material groups, repainting the full color buffer, or copying mesh buffers into undo history.
 - Pressing `h` hides all selected objects.
 - Pressing `Option+H` or `Command+H` unhides all objects when the browser receives the event.
 - Viewer hotkeys are ignored while the active target is an editable text field or content-editable area.

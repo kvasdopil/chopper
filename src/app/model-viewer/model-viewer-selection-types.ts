@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { Dispatch, SetStateAction } from "react";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 
@@ -10,6 +11,7 @@ import type {
   RememberedTriangleSelection,
   SelectionBoundaryLoop,
   ViewerHistorySnapshot,
+  ViewerHistorySnapshotOptions,
 } from "./model-viewer-core";
 import type {
   LinkedFaceSelectionGraph,
@@ -61,7 +63,9 @@ export type ModelViewerSelectionParams = {
   clearObjectSelectionState: () => void;
   clearSelectedLooseEdgeLoop: () => void;
   clearSelectionBoundaryLoopOverlay: () => void;
-  createCurrentViewerHistorySnapshot: () => ViewerHistorySnapshot | null;
+  createCurrentViewerHistorySnapshot: (
+    options?: ViewerHistorySnapshotOptions,
+  ) => ViewerHistorySnapshot | null;
   pushViewerHistorySnapshot: (snapshot: ViewerHistorySnapshot | null) => void;
   refreshLooseEdgeLoopCapVisibility: (hiddenObjectIds?: Set<number>) => void;
   refreshLooseEdgeLoopDisplayColors: (modelRoot?: THREE.Object3D | null) => void;
@@ -85,7 +89,7 @@ export type ModelViewerSelectionParams = {
   setModelStatusText: (text: string) => void;
   setObjectSelectionState: (objectIds: Set<number>, primaryObjectId: number | null) => void;
   setSeparateModeActiveState: (active: boolean) => void;
-  setSeparatedObjects: (objects: SeparatedObjectSummary[]) => void;
+  setSeparatedObjects: Dispatch<SetStateAction<SeparatedObjectSummary[]>>;
   setSeparationBusyState: (busy: boolean) => void;
   setSeparationProgress: (progress: string | null) => void;
   setSelectedLooseEdgeLoopActive: (active: boolean) => void;

@@ -11,11 +11,11 @@ import type {
 import {
   defaultObjectId,
   defaultViewDirection,
-  hiddenObjectColor,
   cameraNearPlane,
   targetModelSize,
   cloneArrayBuffer,
   cloneFloat32Array,
+  cloneUint8Array,
   cloneUint32Array,
   collectSelectableMeshes,
   getPersistedLoopSegmentKey,
@@ -31,13 +31,19 @@ import {
   type ObjectNameMap,
   type ViewerHistoryMeshState,
   type ViewerHistorySnapshot,
+  type ViewerHistorySnapshotOptions,
 } from "./model-viewer-shared";
 import { colorTriangle } from "./mesh-topology";
+import {
+  ensureMeshEditState,
+  markMeshPartIdsChanged,
+  rebuildMeshEditState,
+} from "./mesh-edit-state";
 import { getLooseEdgeLoopCacheKey } from "./loose-edge-loops";
 import { editorGlbMetadataVersion } from "./editor-metadata";
 import type { EditorMetadata } from "./editor-metadata";
 
-export function applyObjectColors(model: THREE.Object3D, hiddenObjectIds = new Set<number>()) {
+export function applyObjectColors(model: THREE.Object3D, _hiddenObjectIds = new Set<number>()) {
   model.updateMatrixWorld(true);
 
   model.traverse((child) => {
@@ -65,11 +71,8 @@ export function applyObjectColors(model: THREE.Object3D, hiddenObjectIds = new S
     for (let index = 0; index < position.count; index += 3) {
       const triangleIndex = index / 3;
       const objectId = objectIds?.[triangleIndex] ?? defaultObjectId;
-      const objectColor = hiddenObjectIds.has(objectId)
-        ? hiddenObjectColor
-        : getSeparatedObjectColor(objectId);
 
-      colorTriangle(color, index, objectColor);
+      colorTriangle(color, index, getSeparatedObjectColor(objectId));
     }
 
     color.needsUpdate = true;
@@ -137,6 +140,7 @@ export function getPersistedMeshState(
 ): PersistedMeshState | null {
   const position = mesh.geometry.getAttribute("position");
   const objectIds = getTriangleObjectIds(mesh);
+  const editState = ensureMeshEditState(mesh);
   const topologyIds =
     position instanceof THREE.BufferAttribute ? vertexTopologyIdsByPosition.get(position) : null;
   const meshState: PersistedMeshState = { meshIndex };
@@ -153,7 +157,14 @@ export function getPersistedMeshState(
     meshState.vertexTopologyIds = cloneUint32Array(topologyIds);
   }
 
-  return meshState.positions || meshState.triangleObjectIds || meshState.vertexTopologyIds
+  if (editState?.edgeCut.some((value) => value !== 0)) {
+    meshState.edgeCut = cloneUint8Array(editState.edgeCut);
+  }
+
+  return meshState.edgeCut ||
+    meshState.positions ||
+    meshState.triangleObjectIds ||
+    meshState.vertexTopologyIds
     ? meshState
     : null;
 }
@@ -268,9 +279,12 @@ export function getViewerHistoryMeshState(
     return null;
   }
 
+  const editState = ensureMeshEditState(mesh);
   const topologyIds = vertexTopologyIdsByPosition.get(position);
 
   return {
+    edgeCut: editState ? cloneUint8Array(editState.edgeCut) : new Uint8Array(),
+    edgeLoopId: editState ? cloneUint32Array(editState.edgeLoopId) : new Uint32Array(),
     hasPositionEdits: mesh.userData.hasPositionEdits === true,
     meshIndex,
     positions: cloneFloat32Array(position.array),
@@ -287,7 +301,9 @@ export function createViewerHistorySnapshot(
   objectNames: ObjectNameMap,
   nextObjectId: number,
   loopCapStates: Map<string, LooseEdgeLoopCapState>,
+  options: ViewerHistorySnapshotOptions = {},
 ): ViewerHistorySnapshot {
+  const includeMeshes = options.includeMeshes ?? true;
   const meshes = collectSelectableMeshes(modelRoot);
   const loopCapStateSnapshots: PersistedLoopCapState[] = [];
 
@@ -302,9 +318,12 @@ export function createViewerHistorySnapshot(
   return {
     hiddenObjectIds: Array.from(hiddenObjectIds).sort((first, second) => first - second),
     loopCapStates: loopCapStateSnapshots,
-    meshes: meshes
-      .map((mesh, meshIndex) => getViewerHistoryMeshState(mesh, meshIndex))
-      .filter((meshState): meshState is ViewerHistoryMeshState => meshState !== null),
+    meshStateIncluded: includeMeshes,
+    meshes: includeMeshes
+      ? meshes
+          .map((mesh, meshIndex) => getViewerHistoryMeshState(mesh, meshIndex))
+          .filter((meshState): meshState is ViewerHistoryMeshState => meshState !== null)
+      : [],
     nextObjectId,
     objectNames: { ...objectNames },
   };
@@ -349,9 +368,29 @@ export function applyViewerHistoryMeshStates(
       hadInvalidState = true;
     }
 
-    mesh.geometry.computeVertexNormals();
-    mesh.geometry.computeBoundingBox();
-    mesh.geometry.computeBoundingSphere();
+    const editState = rebuildMeshEditState(mesh);
+
+    if (editState) {
+      if (meshState.edgeCut.length === editState.edgeCut.length) {
+        editState.edgeCut.set(meshState.edgeCut);
+      } else if (meshState.edgeCut.length > 0) {
+        hadInvalidState = true;
+      }
+
+      if (meshState.edgeLoopId.length === editState.edgeLoopId.length) {
+        editState.edgeLoopId.set(meshState.edgeLoopId);
+      } else if (meshState.edgeLoopId.length > 0) {
+        hadInvalidState = true;
+      }
+
+      markMeshPartIdsChanged(mesh);
+    }
+
+    if (meshState.hasPositionEdits) {
+      mesh.geometry.computeVertexNormals();
+      mesh.geometry.computeBoundingBox();
+      mesh.geometry.computeBoundingSphere();
+    }
   });
 
   return hadInvalidState;
@@ -398,9 +437,33 @@ export function applyPersistedMeshStates(model: THREE.Object3D, meshStates: Pers
       }
     }
 
-    mesh.geometry.computeVertexNormals();
-    mesh.geometry.computeBoundingBox();
-    mesh.geometry.computeBoundingSphere();
+    const editState = rebuildMeshEditState(mesh);
+
+    if (editState) {
+      if (meshState.edgeCut) {
+        if (meshState.edgeCut.length === editState.edgeCut.length) {
+          editState.edgeCut.set(meshState.edgeCut);
+        } else {
+          hadInvalidState = true;
+        }
+      }
+
+      if (meshState.edgeLoopId) {
+        if (meshState.edgeLoopId.length === editState.edgeLoopId.length) {
+          editState.edgeLoopId.set(meshState.edgeLoopId);
+        } else {
+          hadInvalidState = true;
+        }
+      }
+
+      markMeshPartIdsChanged(mesh);
+    }
+
+    if (meshState.positions) {
+      mesh.geometry.computeVertexNormals();
+      mesh.geometry.computeBoundingBox();
+      mesh.geometry.computeBoundingSphere();
+    }
   });
 
   return hadInvalidState;

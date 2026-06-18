@@ -75,7 +75,7 @@ export function ObjectsPanel({
   };
 
   return (
-    <div className="pointer-events-auto absolute top-4 right-4 w-56 max-w-[calc(100vw-2rem)] rounded-md bg-white/85 px-3 py-2 text-sm text-neutral-700 shadow-sm backdrop-blur">
+    <div className="pointer-events-auto absolute top-4 right-4 flex max-h-[calc(100vh-2rem)] w-56 max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-md bg-white/85 px-3 py-2 text-sm text-neutral-700 shadow-sm backdrop-blur">
       <div className="mb-2 flex items-center justify-between gap-3">
         <span className="truncate">Objects</span>
         <div className="flex items-center gap-2">
@@ -117,7 +117,7 @@ export function ObjectsPanel({
           </button>
         </div>
       </div>
-      <div className="max-h-56 space-y-1 overflow-auto pr-1">
+      <div className="min-h-0 space-y-1 overflow-auto pr-1">
         {objects.map((object) => {
           const isSelected = selectedObjectIds.has(object.id);
           const isEditing = object.id === editingObjectId;
@@ -161,7 +161,18 @@ export function ObjectsPanel({
                   </span>
                 )}
               </div>
-              <span className="text-xs text-neutral-500 tabular-nums">{object.triangleCount}</span>
+              <span className="flex shrink-0 items-center gap-1 text-xs text-neutral-500 tabular-nums">
+                {object.hasUnclosedLoops ? (
+                  <span
+                    className="-my-1 inline-flex h-5 w-4 items-center justify-center text-base leading-none text-red-500"
+                    aria-label="Object has unclosed loops"
+                    title="Object has unclosed loops"
+                  >
+                    •
+                  </span>
+                ) : null}
+                {object.triangleCount}
+              </span>
               <button
                 type="button"
                 className="shrink-0 rounded-sm p-1 text-base text-neutral-500 transition hover:bg-neutral-950/10 hover:text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"

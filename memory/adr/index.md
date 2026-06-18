@@ -10,4 +10,4 @@ Related documents:
 - [Authoring workflows](../mbb/workflows.md): Step-by-step guidance for recording a new architectural decision. Read this when adding the next ADR.
 - [Examples](../mbb/examples.md): Short ADR example and template. Read this if you want a concrete starting point.
 
-No ADRs are recorded yet. Start with `0001-...` when the first stable decision needs a durable home.
+- [Immutable mesh editor state](0001-immutable-mesh-editor-state.md): Records the decision to keep loaded geometry stable and represent edits as face/edge metadata. Read this before changing topology, undo, persistence, or export internals.

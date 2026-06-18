@@ -16,10 +16,12 @@ import {
   isSelectableMesh,
   refreshTriangleObjectIdAttribute,
 } from "./model-viewer-shared";
+import { ensureMeshEditState } from "./mesh-edit-state";
 
 export function refreshObjectBoundaryAttributes(mesh: THREE.Mesh) {
   const position = mesh.geometry.getAttribute("position");
   const objectIds = getTriangleObjectIds(mesh);
+  const editState = ensureMeshEditState(mesh);
 
   if (!(position instanceof THREE.BufferAttribute) || !objectIds) {
     return;
@@ -48,6 +50,7 @@ export function refreshObjectBoundaryAttributes(mesh: THREE.Mesh) {
   const edgeRecords = new Map<
     string,
     Array<{
+      cut: boolean;
       edgeSlot: number;
       objectId: number;
       triangleIndex: number;
@@ -59,6 +62,7 @@ export function refreshObjectBoundaryAttributes(mesh: THREE.Mesh) {
   for (let index = 0; index < triangleVertexCount; index += 3) {
     const triangleIndex = index / 3;
     const objectId = objectIds[triangleIndex] ?? defaultObjectId;
+    const face = editState?.faces[triangleIndex];
     const vertexKeys = [
       getVertexPositionKey(position, index),
       getVertexPositionKey(position, index + 1),
@@ -69,13 +73,19 @@ export function refreshObjectBoundaryAttributes(mesh: THREE.Mesh) {
     barycentricValues.set([1, 0, 0, 0, 1, 0, 0, 0, 1], barycentricStart);
 
     [
-      { edgeSlot: 2, first: 0, second: 1 },
-      { edgeSlot: 0, first: 1, second: 2 },
-      { edgeSlot: 1, first: 2, second: 0 },
-    ].forEach(({ edgeSlot, first, second }) => {
+      { edgeSlot: 2, faceEdgeSlot: 0, first: 0, second: 1 },
+      { edgeSlot: 0, faceEdgeSlot: 1, first: 1, second: 2 },
+      { edgeSlot: 1, faceEdgeSlot: 2, first: 2, second: 0 },
+    ].forEach(({ edgeSlot, faceEdgeSlot, first, second }) => {
       const edgeKey = [vertexKeys[first], vertexKeys[second]].sort().join("|");
       const records = edgeRecords.get(edgeKey);
-      const record = { edgeSlot, objectId, triangleIndex };
+      const edgeId = face?.edgeIds[faceEdgeSlot];
+      const record = {
+        cut: edgeId != null && editState?.edgeCut[edgeId] === 1,
+        edgeSlot,
+        objectId,
+        triangleIndex,
+      };
 
       if (records) {
         records.push(record);
@@ -88,7 +98,7 @@ export function refreshObjectBoundaryAttributes(mesh: THREE.Mesh) {
   edgeRecords.forEach((records) => {
     const edgeObjectIds = new Set(records.map((record) => record.objectId));
 
-    if (records.length > 1 && edgeObjectIds.size === 1) {
+    if (records.length > 1 && edgeObjectIds.size === 1 && records.every((record) => !record.cut)) {
       return;
     }
 
@@ -216,6 +226,51 @@ outgoingLight = mix(outgoingLight, objectBoundaryOutlineColor, objectBoundaryOut
   material.customProgramCacheKey = () => "object-boundary-outline-v1";
 
   return material;
+}
+
+function updateFaceMaterialDisplayState(
+  material: THREE.Material,
+  hiddenObjectIds: Set<number>,
+  focusedObjectIds: Set<number> | null,
+) {
+  const objectId = material.userData.objectId;
+
+  if (typeof objectId !== "number") {
+    return;
+  }
+
+  const visible = !hiddenObjectIds.has(objectId);
+  const opacity =
+    focusedObjectIds != null &&
+    focusedObjectIds.size > 0 &&
+    !focusedObjectIds.has(objectId) &&
+    visible
+      ? nonFocusedObjectOpacity
+      : 1;
+  const transparent = opacity < 1;
+  const needsShaderUpdate =
+    material.transparent !== transparent || material.depthWrite === transparent;
+
+  material.visible = visible;
+  material.opacity = opacity;
+  material.transparent = transparent;
+  material.depthWrite = !transparent;
+
+  if (needsShaderUpdate) {
+    material.needsUpdate = true;
+  }
+}
+
+export function refreshMeshObjectMaterialDisplayState(
+  mesh: THREE.Mesh,
+  hiddenObjectIds: Set<number>,
+  focusedObjectIds: Set<number> | null = null,
+) {
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+
+  materials.forEach((material) =>
+    updateFaceMaterialDisplayState(material, hiddenObjectIds, focusedObjectIds),
+  );
 }
 
 export function createSelectedObjectStencilMaterial(stencilRef = 1) {
@@ -376,12 +431,26 @@ export function refreshMeshObjectMaterialGroups(
 ) {
   const position = mesh.geometry.getAttribute("position");
   const objectIds = getTriangleObjectIds(mesh);
+  const editState = ensureMeshEditState(mesh);
   const sourceMaterialIndexes = mesh.geometry.userData.sourceMaterialIndexes as
     | Uint32Array
     | undefined;
   const textureVisible = mesh.userData.textureVisible === true;
 
   if (!(position instanceof THREE.BufferAttribute) || !objectIds || objectIds.length === 0) {
+    return;
+  }
+
+  const materialGroupSignature = [
+    editState?.partVersion ?? 0,
+    mesh.userData.textureVisible === true ? 1 : 0,
+  ].join("|");
+
+  if (
+    mesh.userData.objectMaterialGroupsDirty !== true &&
+    mesh.userData.objectMaterialGroupSignature === materialGroupSignature
+  ) {
+    refreshMeshObjectMaterialDisplayState(mesh, hiddenObjectIds, focusedObjectIds);
     return;
   }
 
@@ -401,21 +470,9 @@ export function refreshMeshObjectMaterialGroups(
 
     const materialIndex = materials.length;
     const textureMap = textureVisible ? getMeshSourceTextureMap(mesh, sourceMaterialIndex) : null;
-    const isDimmed =
-      focusedObjectIds != null &&
-      focusedObjectIds.size > 0 &&
-      !focusedObjectIds.has(objectId) &&
-      !hiddenObjectIds.has(objectId);
 
     materialIndexByKey.set(key, materialIndex);
-    materials.push(
-      createFaceMaterial(
-        !hiddenObjectIds.has(objectId),
-        textureMap,
-        objectId,
-        isDimmed ? nonFocusedObjectOpacity : 1,
-      ),
-    );
+    materials.push(createFaceMaterial(true, textureMap, objectId));
 
     return materialIndex;
   };
@@ -449,6 +506,10 @@ export function refreshMeshObjectMaterialGroups(
     currentMaterialIndex = materialIndex;
     runStartTriangleIndex = triangleIndex;
   }
+
+  mesh.userData.objectMaterialGroupSignature = materialGroupSignature;
+  mesh.userData.objectMaterialGroupsDirty = false;
+  refreshMeshObjectMaterialDisplayState(mesh, hiddenObjectIds, focusedObjectIds);
 }
 
 export function refreshObjectMaterialGroups(

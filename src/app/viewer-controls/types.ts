@@ -27,6 +27,7 @@ export type LinkedFaceSelectionGraph = {
 
 export type SeparatedObjectSummary = {
   color: string;
+  hasUnclosedLoops: boolean;
   id: number;
   label: string;
   triangleCount: number;

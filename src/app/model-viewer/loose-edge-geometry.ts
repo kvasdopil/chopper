@@ -22,6 +22,7 @@ import {
   type LooseEdgeRenderCache,
   type LooseEdgeSegment,
 } from "./model-viewer-shared";
+import { resetMeshEdgeLoopIds } from "./mesh-edit-state";
 import { getTriangleNormal } from "./mesh-topology";
 import { getLooseEdgeLoop, getLoopFillPointKey } from "./loose-edge-loops";
 
@@ -229,6 +230,7 @@ export function createLooseEdgeGeometry(
   const geometry = new LineSegmentsGeometry();
   const position = mesh.geometry.getAttribute("position");
   const objectIds = getTriangleObjectIds(mesh);
+  const editState = resetMeshEdgeLoopIds(mesh);
   const edgeSegments = new Map<
     string,
     {
@@ -236,6 +238,7 @@ export function createLooseEdgeGeometry(
       end: THREE.Vector3;
       endKey: string;
       endPositionKey: string;
+      edgeId?: number;
       edgeKey: string;
       normal: THREE.Vector3;
       objectId: number;
@@ -258,6 +261,7 @@ export function createLooseEdgeGeometry(
   for (let index = 0; index < position.count; index += 3) {
     const triangleIndex = index / 3;
     const objectId = objectIds?.[triangleIndex] ?? defaultObjectId;
+    const face = editState?.faces[triangleIndex];
 
     const vertices = [
       {
@@ -276,15 +280,18 @@ export function createLooseEdgeGeometry(
     const normal = getTriangleNormal(vertices).normalize();
 
     [
-      [vertices[0], vertices[1]],
-      [vertices[1], vertices[2]],
-      [vertices[2], vertices[0]],
-    ].forEach(([start, end]) => {
-      const edgeKey = [start.key, end.key].sort().join("|");
+      { edgeSlot: 0, end: vertices[1], start: vertices[0] },
+      { edgeSlot: 1, end: vertices[2], start: vertices[1] },
+      { edgeSlot: 2, end: vertices[0], start: vertices[2] },
+    ].forEach(({ edgeSlot, start, end }) => {
+      const indexedEdgeKey = face?.edgeKeys[edgeSlot];
+      const edgeId = face?.edgeIds[edgeSlot];
+      const edgeKey = indexedEdgeKey ?? [start.key, end.key].sort().join("|");
       const startPositionKey = getLoopFillPointKey(start.point);
       const endPositionKey = getLoopFillPointKey(end.point);
       const positionEdgeKey = getLooseEdgePositionEdgeKey(start.point, end.point);
-      const key = getLooseEdgeKey(objectId, edgeKey);
+      const isCutEdge = edgeId != null && editState?.edgeCut[edgeId] === 1;
+      const key = getLooseEdgeKey(objectId, isCutEdge ? `${edgeKey}@${triangleIndex}` : edgeKey);
       const existing = edgeSegments.get(key);
 
       if (existing) {
@@ -297,6 +304,7 @@ export function createLooseEdgeGeometry(
         end: end.point,
         endKey: end.key,
         endPositionKey,
+        edgeId,
         edgeKey,
         normal: normal.clone(),
         objectId,
@@ -383,6 +391,7 @@ export function createLooseEdgeGeometry(
       end: edge.end,
       endKey: edge.endKey,
       endPositionKey: edge.endPositionKey,
+      edgeId: edge.edgeId,
       edgeKey: edge.edgeKey,
       index: segmentIndex,
       loopId: -1,
@@ -518,6 +527,10 @@ export function createLooseEdgeGeometry(
             segmentIndexes.push(segment.index);
           }
 
+          if (segment.edgeId != null && editState && segment.edgeId < editState.edgeLoopId.length) {
+            editState.edgeLoopId[segment.edgeId] = loopId + 1;
+          }
+
           loopPositions.push(
             segment.start.x,
             segment.start.y,
@@ -607,13 +620,15 @@ export function refreshLooseEdgeOverlay(
     mesh.userData.looseEdgeOverlay as LineSegments2 | undefined,
   ];
   const hasLooseEdgeCache = mesh.userData.looseEdgeSegmentsByKey instanceof Map;
+  const cacheDirty = mesh.userData.looseEdgeCacheDirty === true;
   const geometry =
-    rebuildCache || !hasLooseEdgeCache
+    rebuildCache || cacheDirty || !hasLooseEdgeCache
       ? createLooseEdgeGeometry(mesh, hiddenObjectIds, selectedObjectId)
       : createLooseEdgeRenderGeometryFromCache(mesh, hiddenObjectIds, selectedObjectId);
   const segmentCount = geometry.userData.segmentCount ?? 0;
 
   mesh.userData.renderedLooseEdgeObjectId = selectedObjectId;
+  mesh.userData.looseEdgeCacheDirty = false;
 
   looseEdgeOverlays.forEach((looseEdges, index) => {
     if (!looseEdges) {

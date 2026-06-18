@@ -1,4 +1,5 @@
 export * from "./model-viewer-shared";
+export * from "./mesh-edit-state";
 export * from "./materials";
 export * from "./model-overlays";
 export * from "./mesh-topology";

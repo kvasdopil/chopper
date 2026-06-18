@@ -7,6 +7,7 @@ import {
   getTriangleObjectIds,
   refreshTriangleObjectIdAttribute,
 } from "./model-viewer-shared";
+import { markMeshPartIdsChanged, rebuildMeshEditState } from "./mesh-edit-state";
 
 export const editorGlbMetadataKey = "modelPlayground";
 export const editorGeneratedLoopMeshKey = "modelPlaygroundGeneratedLoop";
@@ -300,6 +301,8 @@ export function applyEditorGlbMeshStates(model: THREE.Object3D, meshStates: Edit
 
     objectIds.fill(objectId);
     refreshTriangleObjectIdAttribute(mesh);
+    rebuildMeshEditState(mesh);
+    markMeshPartIdsChanged(mesh);
   });
 
   return hadInvalidState;

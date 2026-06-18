@@ -80,10 +80,11 @@ Related documents:
 - Extrusion and cylinder modes store a signed offset along the active axis.
 - Filled-cap mode has no offset handle.
 - Fixed-axis extrusion and cylinder modes show a draggable viewport arrow on the signed offset side.
-- Normal-axis extrusion and cylinder modes show a three-axis translate handle at the normal-axis target.
+- Normal-axis extrusion and cylinder modes show a three-axis translate handle at the normal-axis target and a normal-axis arrow from the loop center to the target.
 - Dragging an adjustment handle updates the stored offset or normal target and regenerates the selected loop geometry.
+- Dragging the normal-axis arrow changes the signed offset along the remembered normal axis; the axis is recalculated only when the three-axis target is moved.
 - The normal-axis target is initialized once when a loop first enters a normal-axis extrusion or cylinder mode.
-- After initialization, the normal-axis offset is the direct distance from the loop center to the stored target point and is not clamped by object geometry.
+- After initialization, the normal-axis offset is the signed displacement from the loop center along the stored normal axis and is not recalculated while dragging the normal-axis arrow through zero.
 - After the normal-axis target is moved, switching away from a normal axis and back restores the remembered target instead of recalculating it.
 - Dragging outside adjustment handles preserves normal camera orbit and pan behavior.
 

@@ -12,21 +12,20 @@ import {
   looseEdgeHoverRenderOrder,
   looseEdgeLineWidth,
   maxLinkedFaceSelectionAngle,
-  ensureVertexTopologyIds,
-  getNextVertexTopologyId,
   getTriangleObjectIds,
   type LinkedFaceSelectionCache,
   type LinkedFaceSelectionDetails,
   type SelectionBoundaryLoop,
 } from "./model-viewer-shared";
-import {
-  buildMeshTopology,
-  colorTriangle,
-  getTriangleEdgeKeys,
-  getTopologyEdgeNormalAngle,
-  getTriangleVertices,
-} from "./mesh-topology";
+import { buildMeshTopology, colorTriangle, getTopologyEdgeNormalAngle } from "./mesh-topology";
+import { setEdgesCut } from "./mesh-edit-state";
 import { getPointFromVertexKey } from "./model-persistence";
+
+function isTopologyEdgeCut(topology: LinkedFaceSelectionDetails["topology"], edgeKey: string) {
+  const edgeId = topology.edgeIdByKey?.get(edgeKey);
+
+  return edgeId != null && topology.edgeCut?.[edgeId] === 1;
+}
 
 export function buildLinkedFaceSelection(
   mesh: THREE.Mesh,
@@ -53,6 +52,10 @@ export function buildLinkedFaceSelection(
     }
 
     topology.triangles[triangleIndex].edgeKeys.forEach((edgeKey) => {
+      if (isTopologyEdgeCut(topology, edgeKey)) {
+        return;
+      }
+
       let edgeAngle = edgeAngleCache.get(edgeKey);
 
       if (edgeAngle == null) {
@@ -167,6 +170,10 @@ export function buildLinkedFaceSelectionCache(
   const connections: Array<{ angle: number; first: number; second: number }> = [];
 
   topology.edgeToTriangles.forEach((triangleIndexes, edgeKey) => {
+    if (isTopologyEdgeCut(topology, edgeKey)) {
+      return;
+    }
+
     const objectTriangleIndexes = triangleIndexes.filter(
       (triangleIndex) => (objectIds?.[triangleIndex] ?? defaultObjectId) === objectId,
     );
@@ -412,6 +419,10 @@ export function buildSelectionBoundaryLoops(selection: LinkedFaceSelectionDetail
 
   selection.selectedTriangleIndexes.forEach((triangleIndex) => {
     selection.topology.triangles[triangleIndex]?.edgeKeys.forEach((edgeKey) => {
+      if (isTopologyEdgeCut(selection.topology, edgeKey)) {
+        return;
+      }
+
       const adjacentTriangleIndexes = selection.topology.edgeToTriangles.get(edgeKey) ?? [];
 
       if (adjacentTriangleIndexes.length !== 2) {
@@ -582,6 +593,10 @@ export function getBoundaryLoopRegionTriangleIndexes(
     regionTriangleIndexes.add(triangleIndex);
 
     selection.topology.triangles[triangleIndex]?.edgeKeys.forEach((edgeKey) => {
+      if (isTopologyEdgeCut(selection.topology, edgeKey)) {
+        return;
+      }
+
       selection.topology.edgeToTriangles.get(edgeKey)?.forEach((edgeTriangleIndex) => {
         if (
           edgeTriangleIndex === triangleIndex ||
@@ -599,127 +614,23 @@ export function getBoundaryLoopRegionTriangleIndexes(
   return regionTriangleIndexes;
 }
 
-function replaceTopologyTriangleEdgeKeys(
-  topology: LinkedFaceSelectionDetails["topology"],
-  triangleIndex: number,
-  nextEdgeKeys: string[],
-) {
-  const triangle = topology.triangles[triangleIndex];
-
-  if (!triangle) {
-    return;
-  }
-
-  triangle.edgeKeys.forEach((edgeKey) => {
-    const triangleIndexes = topology.edgeToTriangles.get(edgeKey);
-
-    if (!triangleIndexes) {
-      return;
-    }
-
-    const index = triangleIndexes.indexOf(triangleIndex);
-
-    if (index >= 0) {
-      triangleIndexes.splice(index, 1);
-    }
-
-    if (triangleIndexes.length === 0) {
-      topology.edgeToTriangles.delete(edgeKey);
-    }
-  });
-
-  triangle.edgeKeys = nextEdgeKeys;
-  nextEdgeKeys.forEach((edgeKey) => {
-    const triangleIndexes = topology.edgeToTriangles.get(edgeKey);
-
-    if (triangleIndexes) {
-      triangleIndexes.push(triangleIndex);
-    } else {
-      topology.edgeToTriangles.set(edgeKey, [triangleIndex]);
-    }
-  });
-}
-
-function refreshCutRegionTopology(
-  topology: LinkedFaceSelectionDetails["topology"],
-  regionTriangleIndexes: Set<number>,
-) {
-  regionTriangleIndexes.forEach((triangleIndex) => {
-    const vertices = getTriangleVertices(topology.position, triangleIndex * 3);
-
-    if (!vertices) {
-      return;
-    }
-
-    topology.triangles[triangleIndex].vertices = vertices;
-    replaceTopologyTriangleEdgeKeys(topology, triangleIndex, getTriangleEdgeKeys(vertices));
-  });
-}
-
 export function cutSelectionBoundaryLoopTopology(
   selection: LinkedFaceSelectionDetails,
   loop: SelectionBoundaryLoop,
 ) {
-  const position = selection.mesh.geometry.getAttribute("position");
   const regionTriangleIndexes = getBoundaryLoopRegionTriangleIndexes(selection, loop);
 
-  if (!(position instanceof THREE.BufferAttribute) || regionTriangleIndexes.size === 0) {
+  if (regionTriangleIndexes.size === 0) {
     return false;
   }
 
-  const cutVertexKeys = new Set<string>();
+  const edgeIds = loop.segmentKeys
+    .map((segmentKey) => selection.topology.edgeIdByKey?.get(segmentKey))
+    .filter((edgeId): edgeId is number => edgeId != null);
 
-  loop.segmentKeys.forEach((segmentKey) => {
-    segmentKey.split("|").forEach((vertexKey) => {
-      if (vertexKey) {
-        cutVertexKeys.add(vertexKey);
-      }
-    });
-  });
-
-  if (cutVertexKeys.size === 0) {
+  if (edgeIds.length === 0) {
     return false;
   }
 
-  const topologyIds = ensureVertexTopologyIds(position);
-  const replacementTopologyIds = new Map<string, number>();
-  let nextTopologyId = getNextVertexTopologyId(position);
-  let changed = false;
-
-  cutVertexKeys.forEach((vertexKey) => {
-    replacementTopologyIds.set(vertexKey, nextTopologyId);
-    nextTopologyId += 1;
-  });
-
-  regionTriangleIndexes.forEach((triangleIndex) => {
-    const startIndex = triangleIndex * 3;
-    const vertices = getTriangleVertices(position, startIndex);
-
-    if (!vertices) {
-      return;
-    }
-
-    vertices.forEach((vertex, offset) => {
-      const replacementTopologyId = replacementTopologyIds.get(vertex.key);
-
-      if (replacementTopologyId == null) {
-        return;
-      }
-
-      const vertexIndex = startIndex + offset;
-
-      if (topologyIds[vertexIndex] === replacementTopologyId) {
-        return;
-      }
-
-      topologyIds[vertexIndex] = replacementTopologyId;
-      changed = true;
-    });
-  });
-
-  if (changed) {
-    refreshCutRegionTopology(selection.topology, regionTriangleIndexes);
-  }
-
-  return changed;
+  return Boolean(setEdgesCut(selection.mesh, edgeIds, true));
 }

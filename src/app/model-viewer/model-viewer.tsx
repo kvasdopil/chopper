@@ -50,6 +50,7 @@ import {
   type LooseEdgeLoop,
   type LooseEdgeLoopCapState,
   type ViewerHistorySnapshot,
+  type ViewerHistorySnapshotOptions,
   type CapOffsetDragState,
   type LinkedFaceSelectionDetails,
   type SelectionBoundaryLoop,
@@ -407,7 +408,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }, persistenceSaveDelayMs);
   };
 
-  const createCurrentViewerHistorySnapshot = () => {
+  const createCurrentViewerHistorySnapshot = (options?: ViewerHistorySnapshotOptions) => {
     const modelRoot = rootRef.current;
 
     if (!modelRoot || !currentModelSourceRef.current) {
@@ -420,6 +421,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       objectNamesRef.current,
       nextSeparatedObjectIdRef.current,
       looseEdgeLoopCapStatesRef.current,
+      options,
     );
   };
 

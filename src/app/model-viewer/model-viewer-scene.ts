@@ -17,6 +17,8 @@ import {
   capOffsetGizmoHitTolerancePx,
   capOffsetGizmoForceClosedHitTolerancePx,
   capOffsetGizmoMinLength,
+  capOffsetGizmoColor,
+  hoverEdgeColor,
   clearModel,
   getTriangleObjectIds,
   getTriangleObjectId,
@@ -42,6 +44,9 @@ import {
 import type { ModelViewerSceneParams } from "./model-viewer-scene-types";
 import type { ViewerCamera } from "./model-viewer-scene-types";
 import type { CameraMode } from "../viewer-controls/camera-mode-toggle";
+
+type CapOffsetDragHit = Omit<CapOffsetDragState, "historySnapshot">;
+
 export function useModelViewerScene(params: ModelViewerSceneParams) {
   const {
     mountRef,
@@ -593,6 +598,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
 
       capOffsetDragRef.current = null;
       controls.enabled = true;
+      setCapOffsetGizmoHovered(false);
 
       if (offsetChanged) {
         pushViewerHistorySnapshot(drag.historySnapshot);
@@ -606,7 +612,18 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
       isEdgeLoopCapToolEnabledRef.current &&
       (capNormalTransformControls.dragging || capNormalTransformControls.axis !== null);
 
-    const getCapOffsetDragAtPointer = (event: PointerEvent): CapOffsetDragState | null => {
+    const isCapNormalTransformDragging = () =>
+      isEdgeLoopCapToolEnabledRef.current && capNormalTransformControls.dragging;
+
+    const setCapOffsetGizmoHovered = (hovered: boolean) => {
+      const arrow = capOffsetGizmoRef.current?.userData.arrowHelper as
+        | THREE.ArrowHelper
+        | undefined;
+
+      arrow?.setColor(hovered ? hoverEdgeColor : capOffsetGizmoColor);
+    };
+
+    const getCapOffsetDragHitAtPointer = (event: PointerEvent): CapOffsetDragHit | null => {
       if (!isEdgeLoopCapToolEnabledRef.current) {
         return null;
       }
@@ -620,11 +637,13 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
       }
 
       const state = getLooseEdgeLoopCapStateHandlerRef.current?.(edge) ?? null;
-      const axisData = state
-        ? getLooseEdgeLoopCapAxisData(edge, state.mode, state.normalTarget)
-        : null;
+      const axisTarget =
+        state && isNormalTargetLoopMode(state.mode)
+          ? (state.normalAxisTarget ?? state.normalTarget)
+          : (state?.normalTarget ?? null);
+      const axisData = state ? getLooseEdgeLoopCapAxisData(edge, state.mode, axisTarget) : null;
 
-      if (!state || !axisData || isNormalTargetLoopMode(state.mode)) {
+      if (!state || !axisData) {
         return null;
       }
 
@@ -702,7 +721,6 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
 
       return {
         edge,
-        historySnapshot: createCurrentViewerHistorySnapshot(),
         offsetDirection: state.offset < 0 ? -1 : 1,
         pixelsPerOffsetUnit,
         pointerId: event.pointerId,
@@ -711,6 +729,12 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
         startClientY: event.clientY,
         startOffset: state.offset,
       };
+    };
+
+    const getCapOffsetDragAtPointer = (event: PointerEvent): CapOffsetDragState | null => {
+      const hit = getCapOffsetDragHitAtPointer(event);
+
+      return hit ? { ...hit, historySnapshot: createCurrentViewerHistorySnapshot() } : null;
     };
 
     const updateCapOffsetDrag = (event: PointerEvent) => {
@@ -742,13 +766,14 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
       capOffsetDragRef.current = drag;
       pointerStart = null;
       controls.enabled = false;
+      setCapOffsetGizmoHovered(true);
       clearHoveredEdge();
       renderer.domElement.setPointerCapture(event.pointerId);
       event.preventDefault();
     };
 
     const handleCapOffsetPointerDownCapture = (event: PointerEvent) => {
-      if (event.button !== 0 || isCapNormalTransformActive()) {
+      if (event.button !== 0 || isCapNormalTransformDragging()) {
         return;
       }
 
@@ -767,7 +792,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
         return;
       }
 
-      if (isCapNormalTransformActive()) {
+      if (isCapNormalTransformDragging()) {
         pointerStart = null;
         clearHoveredEdge();
         return;
@@ -777,6 +802,12 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
 
       if (capOffsetDrag) {
         startCapOffsetDrag(event, capOffsetDrag);
+        return;
+      }
+
+      if (isCapNormalTransformActive()) {
+        pointerStart = null;
+        clearHoveredEdge();
         return;
       }
 
@@ -871,12 +902,23 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     };
 
     const handlePointerMove = (event: PointerEvent) => {
-      if (isCapNormalTransformActive()) {
+      if (updateCapOffsetDrag(event)) {
+        setCapOffsetGizmoHovered(true);
+        return;
+      }
+
+      const capOffsetDragHit = getCapOffsetDragHitAtPointer(event);
+
+      if (capOffsetDragHit) {
+        setCapOffsetGizmoHovered(true);
         clearHoveredEdge();
         return;
       }
 
-      if (updateCapOffsetDrag(event)) {
+      setCapOffsetGizmoHovered(false);
+
+      if (isCapNormalTransformActive()) {
+        clearHoveredEdge();
         return;
       }
 
@@ -908,7 +950,13 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     };
 
     const handlePointerLeave = () => {
-      if (capOffsetDragRef.current || isCapNormalTransformActive()) {
+      if (capOffsetDragRef.current) {
+        return;
+      }
+
+      setCapOffsetGizmoHovered(false);
+
+      if (isCapNormalTransformActive()) {
         return;
       }
 
@@ -916,6 +964,7 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     };
 
     const handlePointerCancel = (event: PointerEvent) => {
+      setCapOffsetGizmoHovered(false);
       finishCapOffsetDrag(event);
     };
 

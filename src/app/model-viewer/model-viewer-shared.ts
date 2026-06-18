@@ -122,6 +122,8 @@ export type ExportObjectGeometry = {
   generatedGroups: ExportGeometryGroup[];
 };
 export type ViewerHistoryMeshState = {
+  edgeCut: Uint8Array;
+  edgeLoopId: Uint16Array | Uint32Array;
   hasPositionEdits: boolean;
   meshIndex: number;
   positions: Float32Array;
@@ -131,9 +133,13 @@ export type ViewerHistoryMeshState = {
 export type ViewerHistorySnapshot = {
   hiddenObjectIds: number[];
   loopCapStates: PersistedLoopCapState[];
+  meshStateIncluded?: boolean;
   meshes: ViewerHistoryMeshState[];
   nextObjectId: number;
   objectNames: ObjectNameMap;
+};
+export type ViewerHistorySnapshotOptions = {
+  includeMeshes?: boolean;
 };
 export type ObjectJoinPlan = {
   objectIdToTargetId: Map<number, number>;
@@ -162,6 +168,7 @@ export type LooseEdgeSegment = {
   end: THREE.Vector3;
   endKey: string;
   endPositionKey: string;
+  edgeId?: number;
   edgeKey: string;
   index: number;
   loopId: number;
@@ -196,6 +203,9 @@ export type TriangleTopology = {
   vertices: TriangleVertex[];
 };
 export type MeshTopology = {
+  edgeCut?: Uint8Array;
+  edgeIdByKey?: Map<string, number>;
+  edgeNormalAngles?: Float32Array;
   edgeToTriangles: Map<string, number[]>;
   mesh: THREE.Mesh;
   position: THREE.BufferAttribute;
@@ -245,6 +255,10 @@ export function cloneArrayBuffer(buffer: ArrayBuffer) {
 
 export function cloneFloat32Array(values: ArrayLike<number>) {
   return new Float32Array(values);
+}
+
+export function cloneUint8Array(values: ArrayLike<number>) {
+  return new Uint8Array(values);
 }
 
 export function cloneUint32Array(values: ArrayLike<number>) {
@@ -490,6 +504,7 @@ export function getTriangleObjectIds(mesh: THREE.Mesh) {
   }
 
   mesh.geometry.userData.triangleObjectIds = objectIds;
+  mesh.geometry.userData.facePartId = objectIds;
   delete mesh.geometry.userData.triangleObjectIdSet;
 
   return objectIds;
@@ -553,10 +568,14 @@ export function refreshTriangleObjectIdAttribute(mesh: THREE.Mesh) {
 
   if (canReuseExisting && existing instanceof THREE.BufferAttribute) {
     existing.needsUpdate = true;
+    mesh.geometry.setAttribute("partId", existing);
     return;
   }
 
-  mesh.geometry.setAttribute("objectId", new THREE.BufferAttribute(values, 1));
+  const attribute = new THREE.BufferAttribute(values, 1);
+
+  mesh.geometry.setAttribute("objectId", attribute);
+  mesh.geometry.setAttribute("partId", attribute);
 }
 
 export function waitForBrowserPaint() {
@@ -587,6 +606,7 @@ export function collectSeparatedObjects(
   objectNames: ObjectNameMap = {},
 ): SeparatedObjectSummary[] {
   const counts = new Map<number, number>();
+  const unclosedLoopObjectIds = new Set<number>();
 
   model.traverse((child) => {
     if (!isSelectableMesh(child)) {
@@ -602,6 +622,20 @@ export function collectSeparatedObjects(
     objectIds.forEach((objectId) => {
       counts.set(objectId, (counts.get(objectId) ?? 0) + 1);
     });
+
+    const loopsById = child.userData.looseEdgeLoopById;
+
+    if (!(loopsById instanceof Map)) {
+      return;
+    }
+
+    loopsById.forEach((loop) => {
+      const typedLoop = loop as LooseEdgeLoop;
+
+      if (!typedLoop.isClosed) {
+        unclosedLoopObjectIds.add(typedLoop.objectId);
+      }
+    });
   });
 
   return [...counts.entries()]
@@ -609,6 +643,7 @@ export function collectSeparatedObjects(
     .sort(([firstId], [secondId]) => firstId - secondId)
     .map(([id, triangleCount]) => ({
       color: getSeparatedObjectColorCss(id),
+      hasUnclosedLoops: unclosedLoopObjectIds.has(id),
       id,
       label: getSeparatedObjectLabel(id, objectNames),
       triangleCount,

@@ -16,6 +16,8 @@ export type PersistedModelSource = {
 };
 
 export type PersistedMeshState = {
+  edgeCut?: Uint8Array;
+  edgeLoopId?: Uint16Array | Uint32Array;
   meshIndex: number;
   positions?: Float32Array;
   triangleObjectIds?: Uint32Array;
