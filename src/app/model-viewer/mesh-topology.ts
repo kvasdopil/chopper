@@ -427,15 +427,19 @@ export function createSelectedObjectJoinPlan(
   return objectIdToTargetId.size > 0 ? { objectIdToTargetId, targetObjectIds } : null;
 }
 
-export function applySelectedObjectJoinPlan(modelRoot: THREE.Object3D, plan: ObjectJoinPlan) {
+export function applySelectedObjectJoinPlan(
+  modelRoot: THREE.Object3D,
+  plan: ObjectJoinPlan,
+  meshes: Iterable<THREE.Mesh> = collectSelectableMeshes(modelRoot),
+) {
   let changed = false;
 
-  collectSelectableMeshes(modelRoot).forEach((mesh) => {
+  for (const mesh of meshes) {
     const position = mesh.geometry.getAttribute("position");
     const objectIds = getTriangleObjectIds(mesh);
 
     if (!(position instanceof THREE.BufferAttribute) || !objectIds) {
-      return;
+      continue;
     }
 
     const edgeRefsByPositionEdgeKey = new Map<
@@ -534,12 +538,12 @@ export function applySelectedObjectJoinPlan(modelRoot: THREE.Object3D, plan: Obj
     }
 
     if (!meshChanged) {
-      return;
+      continue;
     }
 
     markMeshPartIdsChanged(mesh);
     changed = true;
-  });
+  }
 
   return changed;
 }

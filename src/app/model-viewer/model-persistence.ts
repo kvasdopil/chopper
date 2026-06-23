@@ -43,8 +43,30 @@ import { getLooseEdgeLoopCacheKey } from "./loose-edge-loops";
 import { editorGlbMetadataVersion } from "./editor-metadata";
 import type { EditorMetadata } from "./editor-metadata";
 
+export function applyObjectColorsToMeshes(meshes: Iterable<THREE.Mesh>) {
+  for (const mesh of meshes) {
+    const position = mesh.geometry.getAttribute("position");
+    const color = mesh.geometry.getAttribute("color");
+    const objectIds = getTriangleObjectIds(mesh);
+
+    if (!(position instanceof THREE.BufferAttribute) || !(color instanceof THREE.BufferAttribute)) {
+      continue;
+    }
+
+    for (let index = 0; index < position.count; index += 3) {
+      const triangleIndex = index / 3;
+      const objectId = objectIds?.[triangleIndex] ?? defaultObjectId;
+
+      colorTriangle(color, index, getSeparatedObjectColor(objectId));
+    }
+
+    color.needsUpdate = true;
+  }
+}
+
 export function applyObjectColors(model: THREE.Object3D, _hiddenObjectIds = new Set<number>()) {
   model.updateMatrixWorld(true);
+  const meshes: THREE.Mesh[] = [];
 
   model.traverse((child) => {
     if (
@@ -60,23 +82,10 @@ export function applyObjectColors(model: THREE.Object3D, _hiddenObjectIds = new 
       return;
     }
 
-    const position = child.geometry.getAttribute("position");
-    const color = child.geometry.getAttribute("color");
-    const objectIds = getTriangleObjectIds(child);
-
-    if (!(position instanceof THREE.BufferAttribute) || !(color instanceof THREE.BufferAttribute)) {
-      return;
-    }
-
-    for (let index = 0; index < position.count; index += 3) {
-      const triangleIndex = index / 3;
-      const objectId = objectIds?.[triangleIndex] ?? defaultObjectId;
-
-      colorTriangle(color, index, getSeparatedObjectColor(objectId));
-    }
-
-    color.needsUpdate = true;
+    meshes.push(child);
   });
+
+  applyObjectColorsToMeshes(meshes);
 }
 
 export function getPointFromVertexKey(vertexKey: string) {

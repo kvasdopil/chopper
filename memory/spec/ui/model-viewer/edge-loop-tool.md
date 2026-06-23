@@ -109,5 +109,6 @@ Related documents:
 
 - Loose-edge cache rebuilds derive candidate segments from the stable mesh edit edge index instead of re-walking each triangle edge.
 - Boundary-loop cuts and apply-separation refresh only the changed source mesh's loose-edge overlay/cache; unchanged meshes reuse their existing loose-edge cache.
+- Remove-loop refreshes object colors, material groups, generated cap state, and loose-edge colors only for meshes touched by the selected loop group.
 - Existing loop-generation choices survive topology refresh when the same boundary can still be identified.
 - Rebuilding loose-edge groups alone must not create generated geometry for loops whose mode is still `None`.

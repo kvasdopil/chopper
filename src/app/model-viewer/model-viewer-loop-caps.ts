@@ -6,13 +6,12 @@ import {
   capOffsetGizmoMinLength,
   looseEdgeHoverRenderOrder,
   selectedLooseEdgeLoopColor,
-  applyObjectColors,
+  applyObjectColorsToMeshes,
   applySelectedObjectJoinPlan,
   clampLooseEdgeLoopCapOffset,
   clearHoverEdgeOverlay,
   collectSelectableMeshes,
   collectSeparatedObjects,
-  createSelectedObjectJoinPlan,
   createLooseEdgeFromLoop,
   createLooseEdgeLoopFillFromData,
   createLooseEdgeLoopFillOcclusionOverlay,
@@ -25,17 +24,16 @@ import {
   getLooseEdgeLoopCacheKey,
   getLooseEdgeLoopCapAxisData,
   getLooseEdgeLoopCapAxisDataForEdges,
+  getLooseEdgeLoopDisplayColor,
   getLooseEdgeLoopFillData,
   getLooseEdgeLoopsFillData,
   getLooseEdgeLoopFillKey,
   getLooseEdgeLoopFromPersistedState,
-  getTriangleObjectIds,
   isDisposableDrawObject,
   isNormalTargetLoopMode,
   isSameLooseEdgeLoop,
-  isSelectableMesh,
   refreshLooseEdgeOverlay,
-  refreshObjectMaterialGroups,
+  refreshMeshObjectMaterialGroups,
   setLooseEdgeLoopColor,
   setEdgesCut,
   setLooseEdgeLoopFillBaseMaterial,
@@ -353,26 +351,14 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     return objectIds;
   };
 
-  const getMeshesForObjectIds = (modelRoot: THREE.Object3D, objectIds: Set<number>) => {
-    if (objectIds.size === 0) {
-      return new Set<THREE.Mesh>();
-    }
-
+  const getLoopAffectedMeshes = (edges: HoveredEdge[]) => {
     const meshes = new Set<THREE.Mesh>();
 
-    collectSelectableMeshes(modelRoot).forEach((mesh) => {
-      const triangleObjectIds = getTriangleObjectIds(mesh);
-
-      if (!triangleObjectIds) {
-        return;
-      }
-
-      for (let index = 0; index < triangleObjectIds.length; index += 1) {
-        if (objectIds.has(triangleObjectIds[index] ?? 0)) {
-          meshes.add(mesh);
-          return;
-        }
-      }
+    edges.forEach((edge) => {
+      meshes.add(edge.mesh);
+      getLooseEdgeLoopMembers(edge).forEach((member) => {
+        meshes.add(member.edge.mesh);
+      });
     });
 
     return meshes;
@@ -384,6 +370,65 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
         ? collectSeparatedObjects(modelRoot, hiddenObjectIdsRef.current, objectNamesRef.current)
         : [],
     );
+  };
+
+  const getCappedPositionEdgeKeysForMeshes = (meshes: Iterable<THREE.Mesh>) => {
+    const positionEdgeKeys = new Set<string>();
+
+    for (const mesh of meshes) {
+      const loopsById = mesh.userData.looseEdgeLoopById as Map<number, LooseEdgeLoop> | undefined;
+
+      if (!(loopsById instanceof Map)) {
+        continue;
+      }
+
+      loopsById.forEach((loop) => {
+        if (!looseEdgeLoopCapStatesRef.current.has(getLooseEdgeLoopCacheKey(mesh, loop))) {
+          return;
+        }
+
+        loop.pairKey.split("~").forEach((positionEdgeKey) => {
+          if (positionEdgeKey.length > 0) {
+            positionEdgeKeys.add(positionEdgeKey);
+          }
+        });
+      });
+    }
+
+    return positionEdgeKeys;
+  };
+
+  const refreshLooseEdgeLoopDisplayColorsForMeshes = (meshes: Iterable<THREE.Mesh>) => {
+    const meshList = Array.from(meshes);
+    const cappedPositionEdgeKeys = getCappedPositionEdgeKeysForMeshes(meshList);
+
+    meshList.forEach((mesh) => {
+      const loopsById = mesh.userData.looseEdgeLoopById as Map<number, LooseEdgeLoop> | undefined;
+
+      if (!(loopsById instanceof Map)) {
+        return;
+      }
+
+      loopsById.forEach((loop) => {
+        setLooseEdgeLoopColor(
+          mesh,
+          loop.id,
+          getLooseEdgeLoopDisplayColor(
+            mesh,
+            loop,
+            looseEdgeLoopCapStatesRef.current,
+            null,
+            cappedPositionEdgeKeys,
+          ),
+        );
+      });
+    });
+
+    selectedLooseEdgeLoopsRef.current.forEach((selectedLoop) => {
+      if (meshList.includes(selectedLoop.mesh)) {
+        setLooseEdgeLoopColor(selectedLoop.mesh, selectedLoop.loopId, selectedLooseEdgeLoopColor);
+      }
+    });
   };
 
   const getLoopCapEditGroups = (edge: HoveredEdge) => {
@@ -949,19 +994,13 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     schedulePersistViewerState();
   };
 
-  const syncLooseEdgeLoopCapStates = (modelRoot: THREE.Object3D | null = rootRef.current) => {
-    if (!modelRoot) {
-      return;
-    }
-
+  const syncLooseEdgeLoopCapStatesForMeshes = (meshes: Iterable<THREE.Mesh>) => {
+    const meshList = Array.from(meshes);
+    const meshUuids = new Set(meshList.map((mesh) => mesh.uuid));
     const currentKeys = new Set<string>();
 
-    modelRoot.traverse((child) => {
-      if (!isSelectableMesh(child)) {
-        return;
-      }
-
-      const loopsById = child.userData.looseEdgeLoopById;
+    meshList.forEach((mesh) => {
+      const loopsById = mesh.userData.looseEdgeLoopById;
 
       if (!(loopsById instanceof Map)) {
         return;
@@ -970,11 +1009,17 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
       loopsById.forEach((loop) => {
         const typedLoop = loop as LooseEdgeLoop;
 
-        currentKeys.add(getLooseEdgeLoopCacheKey(child, typedLoop));
+        currentKeys.add(getLooseEdgeLoopCacheKey(mesh, typedLoop));
       });
     });
 
     looseEdgeLoopCapStatesRef.current.forEach((state, key) => {
+      const keyMeshUuid = key.split(":")[0] ?? "";
+
+      if (!meshUuids.has(keyMeshUuid) && !meshUuids.has(state.sourceMeshUuid)) {
+        return;
+      }
+
       if (currentKeys.has(key)) {
         return;
       }
@@ -985,7 +1030,15 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
 
     refreshLooseEdgeLoopCapVisibility();
     refreshCapOffsetGizmo();
-    refreshLooseEdgeLoopDisplayColors(modelRoot);
+    refreshLooseEdgeLoopDisplayColorsForMeshes(meshList);
+  };
+
+  const syncLooseEdgeLoopCapStates = (modelRoot: THREE.Object3D | null = rootRef.current) => {
+    if (!modelRoot) {
+      return;
+    }
+
+    syncLooseEdgeLoopCapStatesForMeshes(collectSelectableMeshes(modelRoot));
   };
 
   const getLooseEdgeLoopCapMode = (edge: HoveredEdge) => {
@@ -1708,10 +1761,21 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
 
     const historySnapshot = createCurrentViewerHistorySnapshot();
     const joinObjectIds = getLoopJoinObjectIds(selectedEdges);
-    const affectedMeshes = getMeshesForObjectIds(modelRoot, joinObjectIds);
+    const affectedMeshes = getLoopAffectedMeshes(selectedEdges);
+    const joinObjectIdToTargetId = new Map<number, number>();
+
+    joinObjectIds.forEach((objectId) => {
+      if (objectId !== edge.objectId) {
+        joinObjectIdToTargetId.set(objectId, edge.objectId);
+      }
+    });
+
     const joinPlan =
-      joinObjectIds.size > 1
-        ? createSelectedObjectJoinPlan(modelRoot, joinObjectIds, edge.objectId)
+      joinObjectIdToTargetId.size > 0
+        ? {
+            objectIdToTargetId: joinObjectIdToTargetId,
+            targetObjectIds: new Set([edge.objectId]),
+          }
         : null;
     let changed = false;
 
@@ -1721,7 +1785,7 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     });
 
     if (joinPlan) {
-      changed = applySelectedObjectJoinPlan(modelRoot, joinPlan) || changed;
+      changed = applySelectedObjectJoinPlan(modelRoot, joinPlan, affectedMeshes) || changed;
       joinPlan.objectIdToTargetId.forEach((_targetObjectId, sourceObjectId) => {
         hiddenObjectIdsRef.current.delete(sourceObjectId);
         delete objectNamesRef.current[sourceObjectId];
@@ -1735,20 +1799,21 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
 
     pushViewerHistorySnapshot(historySnapshot);
     removeLoopCapGroupStates(getLoopCapEditGroups(edge));
-    clearSelectedLooseEdgeLoop();
-    applyObjectColors(modelRoot, hiddenObjectIdsRef.current);
-    refreshObjectMaterialGroups(modelRoot, hiddenObjectIdsRef.current);
+    clearSelectedLooseEdgeLoop(false);
+    applyObjectColorsToMeshes(affectedMeshes);
+    affectedMeshes.forEach((mesh) => {
+      refreshMeshObjectMaterialGroups(mesh, hiddenObjectIdsRef.current);
+    });
     refreshViewportObjectOutlines(modelRoot, hiddenObjectIdsRef.current);
     affectedMeshes.forEach((mesh) => {
       refreshLooseEdgeOverlay(mesh, hiddenObjectIdsRef.current, selectedObjectIdRef.current, true);
     });
-    syncLooseEdgeLoopCapStates(modelRoot);
-    refreshLooseEdgeLoopDisplayColors(modelRoot);
+    syncLooseEdgeLoopCapStatesForMeshes(affectedMeshes);
     refreshSeparatedObjectList(modelRoot);
     schedulePersistViewerState();
   };
 
-  const clearSelectedLooseEdgeLoop = () => {
+  const clearSelectedLooseEdgeLoop = (refreshVisuals = true) => {
     const currentLoop = selectedLooseEdgeLoopRef.current;
 
     selectedLooseEdgeLoopOverlayRef.current.forEach((overlay) => {
@@ -1764,6 +1829,11 @@ export function useModelViewerLoopCaps(params: ModelViewerLoopCapsParams) {
     setSelectedLooseEdgeLoopRemovable(false);
     setLooseEdgeLoopMode("none");
     setLooseEdgeLoopCone(false);
+
+    if (!refreshVisuals) {
+      return;
+    }
+
     refreshLooseEdgeLoopCapVisibility();
     refreshViewportObjectOutlines(currentLoop?.mesh.parent ?? rootRef.current);
     refreshLooseEdgeLoopDisplayColors(currentLoop?.mesh.parent ?? rootRef.current);
