@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useModelViewerScene } from "./model-viewer-scene";
 import type { ViewerCamera } from "./model-viewer-scene-types";
 import type { SeparationCameraState } from "./model-viewer-selection-types";
@@ -66,6 +66,7 @@ import {
   type PersistedModelSource,
   type PersistedViewerState,
 } from "./persistence";
+import { getViewerFileStats } from "./file-stats";
 import {
   applyEditorGlbMeshStates,
   getEditorGlbMetadata,
@@ -95,6 +96,7 @@ import type {
 } from "../viewer-controls/types";
 
 type ModelViewerProps = {
+  fileSlug: string;
   tools: ViewerTool[];
 };
 
@@ -104,14 +106,13 @@ type AutoNameDebugState = {
   markers: Array<AutoNamedImageObject & { x: number; y: number }>;
 };
 
-export function ModelViewer({ tools }: ModelViewerProps) {
+export function ModelViewer({ fileSlug, tools }: ModelViewerProps) {
   const enabledToolIds = new Set<ViewerToolId>(tools.map((tool) => tool.id));
   const isSeparationToolEnabled = enabledToolIds.has("separation");
   const isEdgeLoopCapToolEnabled = enabledToolIds.has("edge-loop-cap");
   const mountRef = useRef<HTMLDivElement | null>(null);
   const isSeparationToolEnabledRef = useRef(isSeparationToolEnabled);
   const isEdgeLoopCapToolEnabledRef = useRef(isEdgeLoopCapToolEnabled);
-  const inputRef = useRef<HTMLInputElement | null>(null);
   const loaderRef = useRef<GLTFLoader | null>(null);
   const rootRef = useRef<THREE.Group | null>(null);
   const linkedFaceSelectionRef = useRef<LinkedFaceSelectionDetails | null>(null);
@@ -367,6 +368,20 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     });
   };
 
+  const captureViewportScreenshotDataUrl = () => {
+    const canvas = mountRef.current?.querySelector("canvas");
+
+    if (!(canvas instanceof HTMLCanvasElement)) {
+      return null;
+    }
+
+    try {
+      return canvas.toDataURL("image/png");
+    } catch {
+      return null;
+    }
+  };
+
   const persistViewerStateNow = async () => {
     const modelRoot = rootRef.current;
     const source = currentModelSourceRef.current;
@@ -376,16 +391,25 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }
 
     try {
-      await savePersistedViewerState(
-        createPersistedViewerState(
+      const state = createPersistedViewerState(
+        modelRoot,
+        source,
+        hiddenObjectIdsRef.current,
+        objectNamesRef.current,
+        nextSeparatedObjectIdRef.current,
+        looseEdgeLoopCapStatesRef.current,
+      );
+      const screenshotDataUrl = captureViewportScreenshotDataUrl();
+
+      await savePersistedViewerState(fileSlug, state, {
+        ...(screenshotDataUrl ? { screenshotDataUrl } : {}),
+        stats: getViewerFileStats(
           modelRoot,
-          source,
           hiddenObjectIdsRef.current,
           objectNamesRef.current,
-          nextSeparatedObjectIdRef.current,
           looseEdgeLoopCapStatesRef.current,
         ),
-      );
+      });
       persistenceSaveFailedRef.current = false;
     } catch {
       if (!persistenceSaveFailedRef.current) {
@@ -683,6 +707,14 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     const model = gltf.scene;
     const editorGlbMetadata = getEditorGlbMetadata(model);
     const persistedEditorMetadata = persistedState?.metadata;
+    const shouldUseEmbeddedEditorMetadata =
+      editorGlbMetadata != null &&
+      persistedState != null &&
+      !persistedEditorMetadata &&
+      persistedState.meshes.length === 0 &&
+      persistedState.loopCapStates.length === 0 &&
+      persistedState.hiddenObjectIds.length === 0 &&
+      Object.keys(persistedState.objectNames).length === 0;
     let hadInvalidPersistedState = false;
 
     resetViewerStateForModelLoad();
@@ -692,7 +724,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     setTextureAvailable(modelHasSourceTextureMaps(model));
     normalizeModel(model);
 
-    if (persistedState) {
+    if (persistedState && !shouldUseEmbeddedEditorMetadata) {
       const metadata = persistedEditorMetadata ?? persistedState;
 
       hadInvalidPersistedState = applyPersistedMeshStates(model, persistedState.meshes);
@@ -770,7 +802,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       isCancelled() || modelLoadVersionRef.current !== restoreLoadVersion;
 
     try {
-      persistedState = await readPersistedViewerState();
+      persistedState = await readPersistedViewerState(fileSlug);
     } catch {
       if (!isRestoreCancelled()) {
         showToast("Could not read the saved model.");
@@ -780,6 +812,11 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }
 
     if (!persistedState || isRestoreCancelled()) {
+      if (!persistedState && !isRestoreCancelled()) {
+        setLoadState("error");
+        setStatusText("File not found");
+      }
+
       return;
     }
 
@@ -806,7 +843,7 @@ export function ModelViewer({ tools }: ModelViewerProps) {
         showToast("Could not restore the saved model.");
 
         try {
-          await clearPersistedViewerState();
+          await clearPersistedViewerState(fileSlug);
         } catch {
           showToast("Could not clear the failed saved model.");
         }
@@ -872,80 +909,6 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     setLoadState,
     setStatusText,
   });
-  const openGlbFile = async (file: File) => {
-    const loader = loaderRef.current;
-    const modelRoot = rootRef.current;
-    const camera = cameraRef.current;
-    const controls = controlsRef.current;
-
-    if (!loader || !modelRoot || !camera || !controls) {
-      setLoadState("error");
-      setStatusText("Viewer is still starting");
-      showToast("Viewer is still starting.");
-      return;
-    }
-
-    if (!file.name.toLowerCase().endsWith(".glb")) {
-      setLoadState("error");
-      setStatusText("Choose a .glb file");
-      showToast("Choose a .glb file.");
-      return;
-    }
-
-    modelLoadVersionRef.current += 1;
-    const loadVersion = modelLoadVersionRef.current;
-    const isCancelled = () => modelLoadVersionRef.current !== loadVersion;
-
-    setLoadState("loading");
-    setStatusText(`Loading ${file.name}`);
-    resetViewerStateForModelLoad();
-    clearModel(modelRoot);
-
-    try {
-      await clearPersistedViewerState();
-    } catch {
-      showToast("Could not reset saved model state.");
-    }
-
-    try {
-      const data = await file.arrayBuffer();
-
-      if (isCancelled()) {
-        return;
-      }
-
-      await loadModelIntoViewer(
-        modelRoot,
-        camera,
-        controls,
-        loader,
-        {
-          data,
-          lastModified: file.lastModified,
-          name: file.name,
-          size: file.size,
-          type: file.type,
-        },
-        null,
-        isCancelled,
-      );
-
-      if (!isCancelled()) {
-        await persistViewerStateNow();
-      }
-    } catch {
-      if (isCancelled()) {
-        return;
-      }
-
-      currentModelSourceRef.current = null;
-      clearScheduledPersistenceSave();
-      clearModel(modelRoot);
-      setLoadState("error");
-      setStatusText("Could not load this GLB");
-      showToast("Could not load this GLB.");
-    }
-  };
 
   const exportBlenderGlb = async () => {
     const modelRoot = rootRef.current;
@@ -1243,17 +1206,6 @@ export function ModelViewer({ tools }: ModelViewerProps) {
     }
   };
 
-  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.currentTarget.value = "";
-
-    if (!file) {
-      return;
-    }
-
-    void openGlbFile(file);
-  };
-
   const objectListSelectedIds =
     selectedObjectIds.size > 0
       ? selectedObjectIds
@@ -1270,16 +1222,15 @@ export function ModelViewer({ tools }: ModelViewerProps) {
       />
 
       <TopBar
+        backHref="/"
         canExport={loadState === "ready" && currentModelSourceRef.current !== null}
         canUndo={canUndo && loadState === "ready" && !separationBusy}
         exportBusy={exportBusy}
         exportThreeMfBusy={exportThreeMfBusy}
-        inputRef={inputRef}
         loadState={loadState}
         statusText={statusText}
         onExportGlb={exportBlenderGlb}
         onExportThreeMf={exportThreeMf}
-        onFileChange={handleFileChange}
         onUndo={undoLastViewerAction}
       />
       <ObjectsPanel

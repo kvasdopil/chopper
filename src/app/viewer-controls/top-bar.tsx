@@ -1,19 +1,18 @@
+import Link from "next/link";
 import { useState } from "react";
-import type { ChangeEvent, RefObject } from "react";
-import { LuChevronDown, LuDownload, LuLoaderCircle, LuUndo2, LuUpload } from "react-icons/lu";
+import { LuChevronDown, LuChevronLeft, LuDownload, LuLoaderCircle, LuUndo2 } from "react-icons/lu";
 
 import type { LoadState } from "./types";
 
 type TopBarProps = {
+  backHref: string;
   canExport: boolean;
   canUndo: boolean;
   exportBusy: boolean;
   exportThreeMfBusy: boolean;
-  inputRef: RefObject<HTMLInputElement | null>;
   loadState: LoadState;
   onExportGlb: () => void;
   onExportThreeMf: () => void;
-  onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onUndo: () => void;
   statusText: string;
 };
@@ -23,15 +22,14 @@ function getDisplayStatusText(statusText: string) {
 }
 
 export function TopBar({
+  backHref,
   canExport,
   canUndo,
   exportBusy,
   exportThreeMfBusy,
-  inputRef,
   loadState,
   onExportGlb,
   onExportThreeMf,
-  onFileChange,
   onUndo,
   statusText,
 }: TopBarProps) {
@@ -43,22 +41,13 @@ export function TopBar({
   return (
     <>
       <div className="pointer-events-none absolute top-4 left-4 flex max-w-[calc(100vw-2rem)] flex-wrap items-center gap-3">
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".glb,model/gltf-binary"
-          className="sr-only"
-          onChange={onFileChange}
-        />
-        <button
-          type="button"
-          className="pointer-events-auto inline-flex items-center gap-2 rounded-md bg-neutral-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950 disabled:cursor-wait disabled:opacity-70"
-          disabled={loadState === "loading"}
-          onClick={() => inputRef.current?.click()}
+        <Link
+          href={backHref}
+          className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-md bg-neutral-950 text-white shadow-sm transition hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+          aria-label="Back to files"
         >
-          <LuUpload aria-hidden="true" className="text-base" />
-          Load GLB
-        </button>
+          <LuChevronLeft aria-hidden="true" className="text-xl" />
+        </Link>
         <button
           type="button"
           className="pointer-events-auto inline-flex items-center gap-2 rounded-md bg-neutral-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950 disabled:cursor-not-allowed disabled:opacity-50"

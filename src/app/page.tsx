@@ -1,8 +1,7 @@
 "use client";
 
-import { ModelViewer } from "./model-viewer/model-viewer";
-import { defaultViewerTools } from "./model-viewer/tools";
+import { FilesScreen } from "./files/files-screen";
 
 export default function Home() {
-  return <ModelViewer tools={defaultViewerTools} />;
+  return <FilesScreen />;
 }

@@ -125,7 +125,11 @@ export function useModelViewerScene(params: ModelViewerSceneParams) {
     let renderer: THREE.WebGLRenderer;
 
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true });
+      renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        preserveDrawingBuffer: true,
+        stencil: true,
+      });
     } catch {
       const errorTimeout = window.setTimeout(() => {
         setLoadState("error");

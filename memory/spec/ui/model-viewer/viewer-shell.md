@@ -13,16 +13,25 @@ Related documents:
 
 ## Model Loading
 
-- The app displays a full-screen 3D viewport for `.glb` files.
+- The app root (`/`) displays a local files screen. Each saved file is opened in the editor at `/file/{slug}`.
+- Static-export builds cannot enumerate browser-local file slugs ahead of time, so unknown `/file/{slug}` paths should recover through the app's not-found fallback when the host serves the exported `404.html`.
+- The files screen lists locally saved files as cards with a screenshot, file name, modified date, and basic model stats. Modified dates under one week old use relative wording such as `3 hours ago`; older dates use an absolute date.
+- The files screen displays browser storage estimates for the local IndexedDB-backed file store when the browser exposes those values.
+- The files screen owns `.glb` import. Importing a GLB creates a durable local file record, generates an initial screenshot, saves the source GLB in IndexedDB, and then opens that file in the editor.
+- The editor route displays a full-screen 3D viewport for one saved `.glb` file.
 - Loading a GLB normalizes the model to fit the viewport and frames the camera around it.
-- Opening a new valid `.glb` replaces the current restorable model before parsing starts. If the new load fails, the previously loaded file must not return on the next browser refresh.
+- Opening a new valid `.glb` creates a separate local file instead of replacing other saved files. If import fails, no new file record should be created.
 - Loading an exported playground GLB restores embedded editor metadata when present. Generated edge-loop groups or legacy generated loop meshes from that GLB are removed before editor overlays and generated geometry are rebuilt from metadata.
 - Loading, restore, and save failures must not fail silently. User-facing failures update visible status where applicable and show transient feedback.
 - The visible model status label is centered at the top of the viewport as bold text without a background card. Loaded `.glb` filenames display without the `.glb` extension.
+- The editor top bar uses a back chevron to return to the files screen. GLB import is not exposed from the editor top bar.
 
 ## Refresh Restore
 
-- A browser refresh restores the active GLB and durable user edits when a restorable model exists.
+- A browser refresh restores the active GLB and durable user edits for the current file slug when a restorable model exists.
+- Local persistence stores file records separately from per-file viewer state so multiple GLBs can be saved and reopened independently.
+- File records include display name, source-file summary, last modified timestamp, screenshot, and basic stats.
+- Autosave updates both the per-file viewer state and the file record screenshot/stats.
 - Durable edits include separated object membership, object names, hidden-object state, topology cuts, edited mesh positions, and edge-loop generation choices.
 - Editable object separation and topology cuts are restored as metadata over source faces and edges; generated loop geometry is rebuilt from that metadata rather than treated as source geometry.
 - Local refresh persistence uses the same editor metadata payload as exported playground GLBs for object names, hidden-object state, next object id, and edge-loop generation choices, plus local mesh deltas for per-triangle membership, topology cuts, and edited positions.
