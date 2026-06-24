@@ -13,6 +13,7 @@ type TopBarProps = {
   loadState: LoadState;
   onExportGlb: () => void;
   onExportThreeMf: () => void;
+  onOpenBambuStudio: () => void;
   onUndo: () => void;
   statusText: string;
 };
@@ -30,6 +31,7 @@ export function TopBar({
   loadState,
   onExportGlb,
   onExportThreeMf,
+  onOpenBambuStudio,
   onUndo,
   statusText,
 }: TopBarProps) {
@@ -83,7 +85,7 @@ export function TopBar({
           </button>
           {isExportMenuOpen && !exportDisabled ? (
             <div
-              className="absolute top-full left-0 z-20 mt-2 min-w-36 overflow-hidden rounded-md bg-white/95 py-1 text-sm text-neutral-900 shadow-sm ring-1 ring-neutral-200 backdrop-blur"
+              className="absolute top-full left-0 z-20 mt-2 min-w-44 overflow-hidden rounded-md bg-white/95 py-1 text-sm text-neutral-900 shadow-sm ring-1 ring-neutral-200 backdrop-blur"
               role="menu"
             >
               <button
@@ -107,6 +109,17 @@ export function TopBar({
                 }}
               >
                 Export 3MF
+              </button>
+              <button
+                type="button"
+                className="block w-full px-3 py-2 text-left transition hover:bg-neutral-100 focus-visible:bg-neutral-100 focus-visible:outline-none"
+                role="menuitem"
+                onClick={() => {
+                  setIsExportMenuOpen(false);
+                  onOpenBambuStudio();
+                }}
+              >
+                Open in Bambu Studio
               </button>
             </div>
           ) : null}

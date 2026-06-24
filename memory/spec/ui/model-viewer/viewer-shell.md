@@ -47,13 +47,14 @@ Related documents:
 
 ## Export
 
-- The top bar provides one export dropdown when a model is loaded. The dropdown menu offers `Export GLB` and `Export 3MF`.
+- The top bar provides one export dropdown when a model is loaded. The dropdown menu offers `Export GLB`, `Export 3MF`, and `Open in Bambu Studio`.
 - GLB export creates a clean GLB containing each separated object as its own named mesh.
 - GLB export preserves object labels and object colors.
 - Generated cap, extrusion, and cylinder geometry is included as real GLB mesh data in the parent object's mesh, not as separate object meshes.
 - When an exported playground GLB is reopened for editing, generated mesh groups are stripped before editor overlays and generated geometry are rebuilt from metadata.
 - GLB export embeds editor metadata for object identity, object names, hidden state, next object id, and edge-loop generation choices so the exported GLB can be reopened for editing.
 - 3MF export creates a slicer-oriented 3MF package with generated loop geometry merged into each parent object.
+- Opening in Bambu Studio creates the same 3MF package, exposes it through a temporary local HTTP URL, and invokes Bambu Studio's custom protocol. This requires a runtime server and is not available from a pure static host unless a reachable file URL can be provided.
 - 3MF export places the exported mesh data on the build plate with the lowest Z coordinate at `0`.
 - 3MF export should emit consistently wound, non-degenerate triangle shells so slicers can derive valid printable solids from triangle order.
 - Exports exclude UI-only overlays such as hover highlights, selection outlines, loose-edge overlays, and adjustment handles.

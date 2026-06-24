@@ -106,6 +106,45 @@ type AutoNameDebugState = {
   markers: Array<AutoNamedImageObject & { x: number; y: number }>;
 };
 
+type ThreeMfExportPackage = {
+  data: ArrayBuffer;
+  dispose: () => void;
+  fileName: string;
+};
+
+type BambuStudioPrepareResponse = {
+  name?: unknown;
+  url?: unknown;
+};
+
+function sanitizeBambuStudioFileName(name: string) {
+  const withoutPath = name.replace(/[\\/]/g, "-");
+  const safeName = withoutPath
+    .replace(/[^\w .()[\]-]+/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return safeName || "model.3mf";
+}
+
+function isMacLikePlatform() {
+  return /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+}
+
+function openBambuStudioProtocol(url: string, name: string) {
+  const separator = url.includes("?") ? "&" : "?";
+  const file = encodeURIComponent(`${url}${separator}name=${sanitizeBambuStudioFileName(name)}`);
+  const anchor = document.createElement("a");
+
+  anchor.href = isMacLikePlatform()
+    ? `bambustudioopen://${file}`
+    : `bambustudio://open?file=${file}`;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
 export function ModelViewer({ fileSlug, tools }: ModelViewerProps) {
   const enabledToolIds = new Set<ViewerToolId>(tools.map((tool) => tool.id));
   const isSeparationToolEnabled = enabledToolIds.has("separation");
@@ -967,51 +1006,141 @@ export function ModelViewer({ fileSlug, tools }: ModelViewerProps) {
     }
   };
 
-  const exportThreeMf = async () => {
+  const createCurrentThreeMfExportPackage = (): ThreeMfExportPackage | null => {
     const modelRoot = rootRef.current;
     const source = currentModelSourceRef.current;
 
-    if (exportThreeMfBusy) {
-      return;
-    }
-
     if (!modelRoot || !source || loadState !== "ready") {
       showToast("Load a GLB before exporting.");
-      return;
+      return null;
     }
 
-    let exportScene: THREE.Scene | null = null;
     const exportFileName = getThreeMfExportFileName(source.name);
-
-    setExportThreeMfBusy(true);
-    setStatusText(`Exporting ${exportFileName}`);
+    const exportScene = createBlenderExportScene(
+      modelRoot,
+      hiddenObjectIdsRef.current,
+      objectNamesRef.current,
+      nextSeparatedObjectIdRef.current,
+      looseEdgeLoopCapStatesRef.current,
+    );
 
     try {
-      exportScene = createBlenderExportScene(
-        modelRoot,
-        hiddenObjectIdsRef.current,
-        objectNamesRef.current,
-        nextSeparatedObjectIdRef.current,
-        looseEdgeLoopCapStatesRef.current,
-      );
-
       const result = createThreeMfPackage(exportScene);
 
       if (!result) {
         throw new Error("3MF export scene is empty");
       }
 
-      downloadArrayBuffer(result, exportFileName, "model/3mf");
-      setStatusText(`Exported ${exportFileName}`);
+      return {
+        data: result,
+        dispose: () => disposeObject(exportScene),
+        fileName: exportFileName,
+      };
     } catch (error) {
-      console.error(`Could not export 3MF "${exportFileName}"`, error);
+      disposeObject(exportScene);
+      throw error;
+    }
+  };
+
+  const readBambuStudioPrepareError = async (response: Response) => {
+    try {
+      const payload = (await response.json()) as { error?: unknown };
+
+      return typeof payload.error === "string" && payload.error.trim().length > 0
+        ? payload.error
+        : response.statusText;
+    } catch {
+      return response.statusText;
+    }
+  };
+
+  const prepareBambuStudioFile = async (data: ArrayBuffer, fileName: string) => {
+    const response = await fetch("/api/bambu/three-mf", {
+      body: data,
+      headers: {
+        "content-type": "model/3mf",
+        "x-file-name": sanitizeBambuStudioFileName(fileName),
+      },
+      method: "POST",
+    });
+
+    if (!response.ok) {
+      throw new Error(await readBambuStudioPrepareError(response));
+    }
+
+    const payload = (await response.json()) as BambuStudioPrepareResponse;
+
+    if (typeof payload.url !== "string" || typeof payload.name !== "string") {
+      throw new Error("Bambu Studio bridge returned an invalid response.");
+    }
+
+    return { name: payload.name, url: payload.url };
+  };
+
+  const exportThreeMf = async () => {
+    if (exportThreeMfBusy) {
+      return;
+    }
+
+    let exportPackage: ThreeMfExportPackage | null = null;
+
+    setExportThreeMfBusy(true);
+
+    try {
+      exportPackage = createCurrentThreeMfExportPackage();
+
+      if (!exportPackage) {
+        return;
+      }
+
+      setStatusText(`Exporting ${exportPackage.fileName}`);
+      downloadArrayBuffer(exportPackage.data, exportPackage.fileName, "model/3mf");
+      setStatusText(`Exported ${exportPackage.fileName}`);
+    } catch (error) {
+      console.error("Could not export 3MF", error);
       setStatusText("Could not export 3MF");
       showToast("Could not export 3MF. Check the console for details.");
     } finally {
-      if (exportScene) {
-        disposeObject(exportScene);
+      exportPackage?.dispose();
+      setExportThreeMfBusy(false);
+    }
+  };
+
+  const openInBambuStudio = async () => {
+    if (exportThreeMfBusy) {
+      return;
+    }
+
+    let exportPackage: ThreeMfExportPackage | null = null;
+
+    setExportThreeMfBusy(true);
+
+    try {
+      exportPackage = createCurrentThreeMfExportPackage();
+
+      if (!exportPackage) {
+        return;
       }
 
+      setStatusText(`Preparing ${exportPackage.fileName} for Bambu Studio`);
+
+      const { name, url } = await prepareBambuStudioFile(
+        exportPackage.data,
+        exportPackage.fileName,
+      );
+
+      openBambuStudioProtocol(url, name);
+      setStatusText(`Sent ${exportPackage.fileName} to Bambu Studio`);
+    } catch (error) {
+      console.error("Could not open 3MF in Bambu Studio", error);
+      setStatusText("Could not open Bambu Studio");
+      showToast(
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : "Could not open Bambu Studio.",
+      );
+    } finally {
+      exportPackage?.dispose();
       setExportThreeMfBusy(false);
     }
   };
@@ -1231,6 +1360,7 @@ export function ModelViewer({ fileSlug, tools }: ModelViewerProps) {
         statusText={statusText}
         onExportGlb={exportBlenderGlb}
         onExportThreeMf={exportThreeMf}
+        onOpenBambuStudio={openInBambuStudio}
         onUndo={undoLastViewerAction}
       />
       <ObjectsPanel
